@@ -1,0 +1,12 @@
+# 執行結果截圖
+result.png
+*.png
+
+# 診斷暫存檔
+*.txt
+!README.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
