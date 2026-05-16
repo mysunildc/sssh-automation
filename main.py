@@ -7,7 +7,10 @@ main.py
 """
 
 import msvcrt
+import sys
 import time
+
+sys.stdout.reconfigure(encoding='utf-8')
 
 from taipeion_login import login_taipeion
 

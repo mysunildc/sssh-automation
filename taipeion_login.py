@@ -140,7 +140,7 @@ def login_taipeion(save_screenshots=False):
     print(f"      點擊登入：螢幕座標 ({sx}, {sy})")
 
     time.sleep(2.5)
-    print("[完成] 登入動作執行完畢，視窗 HWND={hwnd}")
+    print(f"[完成] 登入動作執行完畢，視窗 HWND={hwnd}")
     return hwnd
 
 
