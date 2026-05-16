@@ -13,7 +13,6 @@ from browser_utils import (
     maximize_and_focus,
     grab_window,
     click_at,
-    find_rightmost_cluster,
     find_color_pixels,
     center_of,
 )
@@ -23,74 +22,82 @@ URL            = "https://login.gov.taipei/login.php"
 TITLE_KEYWORDS = ["單一帳號", "臺北", "登入"]
 
 
-def find_tab_offset(hwnd, tab_index, total_tabs=4):
-    """
-    找出分頁列中第 tab_index 個分頁的點擊座標（1-based）。
-    掃描頁面中段水平帶，依 x 方向分群後取第 tab_index 群的中心。
-    """
-    img, r = grab_window(hwnd)
-    ww = r.right - r.left
-    wh = r.bottom - r.top
+def is_teal(rv, gv, bv):
+    """判斷像素是否為頁面的青綠色（登入按鈕和分頁底線的顏色）。"""
+    return gv > 150 and bv > 150 and rv < 80 and abs(gv - bv) < 60
 
-    # 分頁列通常在頁面 20%~45% 高度範圍內
-    y0 = int(wh * 0.20)
-    y1 = int(wh * 0.45)
-    strip = img.crop((0, y0, ww, y1))
 
-    def is_tab_color(rv, gv, bv):
-        # 排除純白背景和純黑文字，找有色區塊
-        brightness = (rv + gv + bv) / 3
-        saturation = max(rv, gv, bv) - min(rv, gv, bv)
-        return saturation > 20 and 30 < brightness < 220
-
-    pts = find_color_pixels(strip, is_tab_color)
+def cluster_by_x(pts, gap=15, min_pixels=5):
+    """將像素點按 x 方向分群，回傳所有群集的清單。"""
     if not pts:
-        return None
-
-    # 按 x 分群（間距 > 50px 視為不同分頁）
+        return []
     pts.sort(key=lambda p: p[0])
     clusters = []
     current = [pts[0]]
     for p in pts[1:]:
-        if p[0] - current[-1][0] <= 50:
+        if p[0] - current[-1][0] <= gap:
             current.append(p)
         else:
-            if len(current) >= 30:
+            if len(current) >= min_pixels:
                 clusters.append(current)
             current = [p]
-    if len(current) >= 30:
+    if len(current) >= min_pixels:
         clusters.append(current)
-
-    print(f"      分頁帶找到 {len(clusters)} 個色塊群集")
-    if len(clusters) < tab_index:
-        return None
-
-    target = clusters[tab_index - 1]
-    c = center_of(target)
-    return c[0], y0 + c[1]
+    return clusters
 
 
-def find_button_offset(hwnd, y_start_ratio=0.45):
+def find_cert_tab_offset(hwnd):
     """
-    在頁面下半部找「登入」按鈕（最顯眼的有色按鈕群集）。
+    偵測「自然人憑證」分頁的青綠色底線，回傳其上方的點擊座標。
+    找不到底線時使用比例座標備用（57.6% x, 51% y）。
     """
     img, r = grab_window(hwnd)
     ww = r.right - r.left
     wh = r.bottom - r.top
 
-    y0 = int(wh * y_start_ratio)
-    strip = img.crop((0, y0, ww, wh))
+    # 分頁底線位於視窗高度約 48%~56% 的水平帶
+    y0 = int(wh * 0.48)
+    y1 = int(wh * 0.56)
+    strip = img.crop((0, y0, ww, y1))
 
-    def is_button_color(rv, gv, bv):
-        # 找藍色或綠色按鈕
-        is_blue  = bv > rv + 20 and bv > gv + 10 and bv > 80
-        is_green = gv > rv + 20 and gv > bv + 20 and gv > 80
-        return is_blue or is_green
+    pts = find_color_pixels(strip, is_teal)
+    clusters = cluster_by_x(pts, gap=10, min_pixels=3)
+    print(f"      分頁底線青綠群集數：{len(clusters)}")
 
-    c = find_rightmost_cluster(strip, is_button_color, min_pixels=50, gap=60)
-    if c:
-        return c[0], y0 + c[1]
-    return None
+    if clusters:
+        # 選取次右側的群集（最右是「行動自然人憑證」，次右是「自然人憑證」）
+        clusters.sort(key=lambda c: max(p[0] for p in c))
+        target = clusters[-2] if len(clusters) >= 2 else clusters[-1]
+        c = center_of(target)
+        # 點底線上方（tab 文字區域）
+        return c[0], y0 + c[1] - 12
+
+    print("      [備用] 使用比例座標定位分頁")
+    return int(ww * 0.576), int(wh * 0.508)
+
+
+def find_login_button_offset(hwnd):
+    """找出頁面中最大的青綠色區塊（「登入」按鈕）的中心座標。"""
+    img, r = grab_window(hwnd)
+    ww = r.right - r.left
+    wh = r.bottom - r.top
+
+    # 登入按鈕位於視窗高度約 60%~82%
+    y0 = int(wh * 0.60)
+    y1 = int(wh * 0.82)
+    strip = img.crop((0, y0, ww, y1))
+
+    pts = find_color_pixels(strip, is_teal)
+    clusters = cluster_by_x(pts, gap=20, min_pixels=20)
+    print(f"      登入按鈕青綠群集數：{len(clusters)}")
+
+    if not clusters:
+        return None
+
+    # 最大群集 = 登入按鈕（按鈕面積最大）
+    largest = max(clusters, key=len)
+    c = center_of(largest)
+    return c[0], y0 + c[1]
 
 
 def main():
@@ -111,13 +118,10 @@ def main():
     img.save("step1_loaded.png")
     print("      初始截圖 → step1_loaded.png")
 
-    print("[2/4] 點選「自然人憑證」分頁（第 3 個）...")
-    offset = find_tab_offset(hwnd, tab_index=3)
-    if offset:
-        sx, sy = click_at(hwnd, offset[0], offset[1])
-        print(f"      點擊分頁：螢幕座標 ({sx}, {sy})")
-    else:
-        print("[WARN] 找不到分頁，跳過")
+    print("[2/4] 點選「自然人憑證」分頁...")
+    tab = find_cert_tab_offset(hwnd)
+    sx, sy = click_at(hwnd, tab[0], tab[1])
+    print(f"      點擊分頁：螢幕座標 ({sx}, {sy})")
 
     time.sleep(1.5)
     img, _ = grab_window(hwnd)
@@ -125,12 +129,12 @@ def main():
     print("      點擊後截圖 → step2_tab_clicked.png")
 
     print("[3/4] 點選「登入」按鈕...")
-    btn = find_button_offset(hwnd)
+    btn = find_login_button_offset(hwnd)
     if btn:
         sx, sy = click_at(hwnd, btn[0], btn[1])
         print(f"      點擊登入：螢幕座標 ({sx}, {sy})")
     else:
-        print("[WARN] 找不到登入按鈕")
+        print("[WARN] 找不到登入按鈕（請確認自然人憑證卡片已插入讀卡機）")
 
     time.sleep(2.5)
 
