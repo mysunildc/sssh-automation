@@ -9,3 +9,6 @@ result.png
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code 本地設定（個人權限，不分享）
+.claude/settings.local.json

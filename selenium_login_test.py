@@ -144,11 +144,12 @@ def main():
         driver = webdriver.Chrome(options=options)
     except WebDriverException as e:
         msg = str(e)
-        if "user data directory is already in use" in msg.lower() or "session not created" in msg.lower():
-            print("[FATAL] Chrome 該 profile 正在使用中。")
-            print("        請先關閉所有 1504@sssh.tp.edu.tw（Profile 2）的 Chrome 視窗再執行。")
-        else:
-            print(f"[FATAL] 無法啟動 Chrome：{e}")
+        print(f"[FATAL] 無法啟動 Chrome。完整錯誤訊息：")
+        print("─" * 60)
+        print(msg)
+        print("─" * 60)
+        if "user data directory is already in use" in msg.lower():
+            print("提示：請先關閉所有 1504@sssh.tp.edu.tw（Profile 2）的 Chrome 視窗再執行。")
         return
 
     try:
