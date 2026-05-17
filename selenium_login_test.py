@@ -13,10 +13,11 @@ selenium_login_test.py
   - 螢幕鎖定下的執行
   - 失敗重試 / 截圖儲存
 
-執行前必做：
-  ★ 關閉所有「1504@sssh.tp.edu.tw（Profile 2）」的 Chrome 視窗 ★
-  Chrome 同一 profile 不允許兩個程序同時開啟，否則會出現
-  "user data directory is already in use" 錯誤。
+設計重點：
+  使用 Selenium 專用 Chrome User Data 目錄（非預設位置），
+  繞過 Chrome 136+ 對「預設 User Data dir 啟用 DevTools port」的安全限制。
+  此目錄首次執行 Chrome 會自動建立，不影響使用者真正的 Profile 2。
+  使用者需在此 profile 內手動登入一次（瀏覽器會儲存密碼），之後即可自動帶入。
 
 執行方式：
     C:\\Python314\\python.exe -m pip install selenium
@@ -25,7 +26,7 @@ selenium_login_test.py
 執行後請觀察：
   A. 是否成功點到「自然人憑證」分頁（畫面切換）
   B. 是否成功點到「登入」按鈕
-  C. 是否跳出 Windows 憑證選擇對話框 / 密碼欄是否帶入儲存密碼
+  C. 結束時自動存截圖 after_login_click.png 供檢查當下畫面
 """
 
 import json
@@ -35,6 +36,8 @@ import time
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+import pyautogui
+from PIL import ImageGrab
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -42,11 +45,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
+pyautogui.FAILSAFE = False
+
 URL = "https://login.gov.taipei/login.php"
 
-# 使用既有 Chrome Profile 2，繼承儲存的密碼 / 憑證設定 / 擴充功能
-USER_DATA_DIR = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-PROFILE_DIR = "Profile 2"
+# Selenium 專用 Chrome User Data 目錄（非預設位置，繞過 Chrome 136+ 自動化限制）
+# 首次執行 Chrome 會自動建立此目錄。使用者於此 profile 手動登入一次後，
+# 之後執行可自動帶入儲存的密碼。
+USER_DATA_DIR = os.path.expandvars(r"%LOCALAPPDATA%\Chrome-Selenium\User Data")
+PROFILE_DIR = "Default"
 
 # 嘗試多組 XPath，依序測試
 CERT_TAB_XPATHS = [
@@ -103,6 +110,49 @@ def try_click(driver, xpaths, label, timeout=8):
     return None
 
 
+def click_chrome_allow_button(driver, timeout=6):
+    """
+    偵測並點擊 Chrome 站台權限對話框的「允許」按鈕。
+
+    這個對話框是 Chrome 瀏覽器級 UI（不在頁面 DOM 內），Selenium 無法直接點擊，
+    必須以螢幕座標 + pyautogui 處理。
+
+    搜尋邏輯：在 URL bar 下方左側區域找 Chrome 主要按鈕的淺藍色像素群集，取其中心點擊。
+    Chrome 對話框允許後會記在 profile 內，下次同 origin 不再跳。
+    """
+    pos = driver.get_window_position()
+    size = driver.get_window_size()
+    x0 = pos['x']
+    y0 = pos['y'] + 95            # URL bar 高度估計
+    x1 = x0 + min(700, size['width'])
+    y1 = y0 + 260
+    print(f"      搜尋區域：({x0},{y0})~({x1},{y1})")
+
+    start = time.time()
+    while time.time() - start < timeout:
+        img = ImageGrab.grab(bbox=(x0, y0, x1, y1))
+        pixels = img.load()
+        w, h = img.size
+        blue_pts = []
+        for y in range(h):
+            for x in range(w):
+                r, g, b = pixels[x, y][:3]
+                # Chrome 主要動作鈕的淺藍背景（約 #C7DEFF 範圍）
+                if b > 230 and g > 200 and r < 225 and (b - r) > 25 and (b - g) > 5:
+                    blue_pts.append((x, y))
+        if len(blue_pts) >= 200:
+            cx = sum(p[0] for p in blue_pts) // len(blue_pts)
+            cy = sum(p[1] for p in blue_pts) // len(blue_pts)
+            click_x, click_y = x0 + cx, y0 + cy
+            pyautogui.click(click_x, click_y)
+            print(f"      ✓ 已點擊「允許」於螢幕座標 ({click_x},{click_y})（{len(blue_pts)} 個藍色像素）")
+            return True
+        time.sleep(0.3)
+
+    print("      x  逾時未偵測到「允許」按鈕（可能 Chrome 已記住權限不再跳對話框）")
+    return False
+
+
 def dump_page_for_debug(driver):
     """流程卡住時印出頁面標題與部分 HTML，方便調整 selector。"""
     print("\n─── 除錯資訊 ───")
@@ -119,13 +169,14 @@ def dump_page_for_debug(driver):
 
 
 def main():
-    print(f"[0/4] 使用 Chrome Profile：{PROFILE_DIR}")
+    print(f"[0/4] 使用 Selenium 專用 profile：{PROFILE_DIR}")
     print(f"      路徑：{USER_DATA_DIR}")
-    if not os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
-        print(f"[FATAL] 找不到 profile 目錄：{os.path.join(USER_DATA_DIR, PROFILE_DIR)}")
-        return
-
-    mark_profile_clean_exit()
+    profile_path = os.path.join(USER_DATA_DIR, PROFILE_DIR)
+    if not os.path.isdir(profile_path):
+        print(f"      首次執行 — Chrome 將自動建立此目錄")
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+    else:
+        mark_profile_clean_exit()
 
     options = Options()
     options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
@@ -139,7 +190,7 @@ def main():
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    print("[1/4] 啟動 Chrome（Selenium Manager 自動下載對應 ChromeDriver）...")
+    print("[1/5] 啟動 Chrome（Selenium Manager 自動下載對應 ChromeDriver）...")
     try:
         driver = webdriver.Chrome(options=options)
     except WebDriverException as e:
@@ -153,7 +204,7 @@ def main():
         return
 
     try:
-        print(f"[2/4] 開啟 {URL}")
+        print(f"[2/5] 開啟 {URL}")
         driver.get(URL)
         time.sleep(2)
 
@@ -196,23 +247,32 @@ def main():
         print(f"      切換後 URL：{driver.current_url}")
         print(f"      頁面標題：{driver.title}")
 
-        print("[3/4] 點選『自然人憑證』分頁...")
+        print("[3/5] 點選『自然人憑證』分頁...")
         if not try_click(driver, CERT_TAB_XPATHS, "自然人憑證分頁"):
             dump_page_for_debug(driver)
             return
         time.sleep(1.5)
 
-        print("[4/4] 點選『登入』按鈕...")
+        print("[4/5] 點選『登入』按鈕...")
         if not try_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
             dump_page_for_debug(driver)
             return
-        time.sleep(3)
+        time.sleep(2)
 
-        print("\n[完成] 已執行到憑證對話框出現的階段。")
-        print("      請觀察：")
-        print("        A. 是否成功切換到自然人憑證分頁？")
-        print("        B. 是否成功點到登入按鈕？")
-        print("        C. 是否跳出 Windows 憑證選擇對話框？")
+        print("[5/5] 偵測 Chrome 站台權限對話框並自動點『允許』...")
+        click_chrome_allow_button(driver)
+        time.sleep(1.5)
+
+        # 存截圖供使用者檢查當下畫面
+        screenshot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "after_login_click.png")
+        try:
+            driver.save_screenshot(screenshot_path)
+            print(f"\n[截圖] {screenshot_path}")
+        except Exception as e:
+            print(f"\n[截圖] 儲存失敗：{e}")
+
+        print(f"      點擊後 URL：{driver.current_url}")
+        print(f"      頁面標題：{driver.title}")
         print("      瀏覽器保持開啟，可接手人工完成或關閉。")
 
     except Exception as e:
