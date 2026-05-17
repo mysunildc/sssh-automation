@@ -156,16 +156,20 @@ def main():
         driver.get(URL)
         time.sleep(2)
 
-        # Profile 2 可能還原多個 tab，確保切到 login.gov.taipei 那個並關掉其他
+        # Profile 2 可能還原多個 tab，先列印全部 window/tab 資訊以便除錯
         handles_before = list(driver.window_handles)
+        print(f"      啟動後共 {len(handles_before)} 個 window/tab：")
         target = None
         for h in handles_before:
             driver.switch_to.window(h)
-            if "login.gov.taipei" in driver.current_url:
+            cur_url = driver.current_url
+            cur_title = driver.title
+            print(f"        - [{h[:8]}...] title='{cur_title}' url={cur_url}")
+            if "login.gov.taipei" in cur_url and target is None:
                 target = h
-                break
+
         if target is None:
-            print("      [警告] 沒有任何 tab 在 login.gov.taipei，重新導向中...")
+            print("      [警告] 沒有任何 tab 在 login.gov.taipei，於第一個 tab 重新導向...")
             driver.switch_to.window(handles_before[0])
             driver.get(URL)
             target = handles_before[0]
@@ -177,6 +181,18 @@ def main():
                     driver.switch_to.window(h)
                     driver.close()
                 driver.switch_to.window(target)
+
+        # 強制把目標 tab 視覺上拉到最前面
+        try:
+            driver.execute_script("window.focus();")
+        except Exception:
+            pass
+        try:
+            driver.maximize_window()
+        except Exception:
+            pass
+
+        print(f"      切換後 URL：{driver.current_url}")
         print(f"      頁面標題：{driver.title}")
 
         print("[3/4] 點選『自然人憑證』分頁...")
