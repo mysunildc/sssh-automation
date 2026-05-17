@@ -131,10 +131,13 @@ def main():
     options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
     options.add_argument(f"--profile-directory={PROFILE_DIR}")
     options.add_argument("--start-maximized")
+    # 隱藏「Chrome 目前受到自動測試軟體控制」infobar
+    options.add_argument("--disable-blink-features=AutomationControlled")
     # 跑完不要關閉瀏覽器，方便人工觀察 / 接手登入
     options.add_experimental_option("detach", True)
-    # 抑制 USB / Bluetooth 等噪音 log
-    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    # 抑制 USB / Bluetooth log + 移除 enable-automation 旗標（infobar 來源）
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_experimental_option("useAutomationExtension", False)
 
     print("[1/4] 啟動 Chrome（Selenium Manager 自動下載對應 ChromeDriver）...")
     try:
@@ -152,6 +155,28 @@ def main():
         print(f"[2/4] 開啟 {URL}")
         driver.get(URL)
         time.sleep(2)
+
+        # Profile 2 可能還原多個 tab，確保切到 login.gov.taipei 那個並關掉其他
+        handles_before = list(driver.window_handles)
+        target = None
+        for h in handles_before:
+            driver.switch_to.window(h)
+            if "login.gov.taipei" in driver.current_url:
+                target = h
+                break
+        if target is None:
+            print("      [警告] 沒有任何 tab 在 login.gov.taipei，重新導向中...")
+            driver.switch_to.window(handles_before[0])
+            driver.get(URL)
+            target = handles_before[0]
+        else:
+            extras = [h for h in handles_before if h != target]
+            if extras:
+                print(f"      偵測到 {len(extras)} 個額外 tab（session restore），關閉以保持單一視窗")
+                for h in extras:
+                    driver.switch_to.window(h)
+                    driver.close()
+                driver.switch_to.window(target)
         print(f"      頁面標題：{driver.title}")
 
         print("[3/4] 點選『自然人憑證』分頁...")
