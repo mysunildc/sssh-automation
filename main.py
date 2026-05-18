@@ -35,16 +35,19 @@ _force_close_all_chrome()
 
 from taipeion_login import login_taipeion
 from taipeion_login_selenium import login_taipeion_selenium
+from click_document import click_document
 
 # ── 功能清單 ──────────────────────────────────────────────────────────────────
-# 每新增一個功能，在此加入一列：(顯示名稱, 呼叫函式)
+# 每新增一列：(顯示名稱, 主函式, 登入後動作 or None)
+# - 若有「登入後動作」，主函式須支援 return_driver=True 並回傳 driver，跑完接著呼叫 post_login(driver)
+# - 沒有後續動作則第三欄填 None，直接呼叫主函式
 # 預設執行 FEATURES[0]；可用 CLI 引數選其他項，例如：
-#   python main.py        # 跑 FEATURES[0]（Selenium 版）
+#   python main.py        # 跑 FEATURES[0]（Selenium 版 + 點公文）
 #   python main.py 2      # 跑 FEATURES[1]（pyautogui 像素點擊版）
 
 FEATURES = [
-    ("臺北市單一帳號認證平台 — 自然人憑證登入（Selenium 版）", login_taipeion_selenium),
-    ("臺北市單一帳號認證平台 — 自然人憑證登入（pyautogui 像素版）", login_taipeion),
+    ("臺北市單一帳號認證平台 — 自然人憑證登入 + 點公文（Selenium 版）", login_taipeion_selenium, click_document),
+    ("臺北市單一帳號認證平台 — 自然人憑證登入（pyautogui 像素版）", login_taipeion, None),
 ]
 
 
@@ -61,10 +64,17 @@ def main():
             print(f"[ERROR] 無效引數 '{sys.argv[1]}'，請傳入 1~{len(FEATURES)}")
             return
 
-    name, func = FEATURES[idx]
+    name, func, post_login = FEATURES[idx]
     print(f"▶ 執行：{name}")
     print("-" * 40)
-    func()
+    if post_login is None:
+        func()
+    else:
+        driver = func(return_driver=True)
+        if driver is None:
+            print("[ERROR] 登入未完成，跳過後續動作。")
+        else:
+            post_login(driver)
     print("-" * 40)
     print("[完成] 程式結束。")
 

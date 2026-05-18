@@ -15,7 +15,8 @@ Smart Card API，HiCOS 無法讀卡。
 
 從其他腳本呼叫：
     from taipeion_login_selenium import login_taipeion_selenium
-    ok = login_taipeion_selenium()  # 回傳 True 表示流程跑完
+    ok = login_taipeion_selenium()                       # 回傳 True 表示流程跑完
+    driver = login_taipeion_selenium(return_driver=True) # 回傳 driver（失敗回 None），方便串接後續動作
 """
 
 import json
@@ -207,9 +208,13 @@ def _click_chrome_allow_button():
         print(f"      pyautogui 點擊失敗：{e}")
 
 
-def login_taipeion_selenium():
+def login_taipeion_selenium(return_driver=False):
     """開啟 TAIPEION 並用 Selenium 走完「自然人憑證 → 登入 → 允許對話框」流程。
-    回傳 True 表示已到 PIN 輸入畫面，等待使用者插卡 + 輸入 PIN。"""
+
+    參數：
+        return_driver: 預設 False，回傳 bool（True 表示流程跑完）。
+                       傳 True 則回傳 driver 物件（失敗回 None），方便呼叫端串接後續動作。
+    """
     print(f"[1/6] 啟動 Chrome（Selenium 專用 profile：{USER_DATA_DIR}）...")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     _reset_crash_streak()
@@ -231,7 +236,7 @@ def login_taipeion_selenium():
         driver.set_script_timeout(10)
     except WebDriverException as e:
         print(f"[FATAL] 無法啟動 Chrome：{str(e)[:300]}")
-        return False
+        return None if return_driver else False
 
     print(f"[2/6] 開啟 {URL}")
     try:
@@ -249,7 +254,7 @@ def login_taipeion_selenium():
 
     print("[4/6] 點選『自然人憑證』分頁...")
     if not _js_click(driver, CERT_TAB_XPATHS, "自然人憑證分頁"):
-        return False
+        return None if return_driver else False
     time.sleep(0.3)
 
     # 卡片/讀卡機未就位時頁面顯示「重新檢測 / 重新偵測卡片」，需重複點擊直到「登入」出現
@@ -266,7 +271,7 @@ def login_taipeion_selenium():
 
     print("[6/6] 點選『登入』按鈕送出...")
     if not _js_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
-        return False
+        return None if return_driver else False
 
     # 等系統處理登入 + 跳轉（HiCOS 簽章 + server redirect 實測需 4-5 秒）
     time.sleep(5)
@@ -283,7 +288,7 @@ def login_taipeion_selenium():
         print(f"[final] 讀狀態失敗：{e}")
 
     print("[完成] 登入流程結束，已跳轉至 TAIPEION 入口網（或仍在最後驗證中）。")
-    return True
+    return driver if return_driver else True
 
 
 if __name__ == "__main__":
