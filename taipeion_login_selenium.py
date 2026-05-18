@@ -231,7 +231,11 @@ def _bring_chrome_to_foreground():
     用 EnumWindows + 比對 class name 'Chrome_WidgetWin_1' 找到第一個可見的 Chrome
     視窗，再用 SetForegroundWindow 拉到前面。為繞過 Windows 對 SetForegroundWindow
     的「只有前景程序能設定前景」限制，先 keyDown/keyUp 一次 Alt 鍵讓本程序短暫取得
-    前景權限（這是常見 hack，不影響功能）。回傳是否成功。
+    前景權限（這是常見 hack，不影響功能）。
+
+    重要：**不能無條件呼叫 ShowWindow(SW_RESTORE)**——SW_RESTORE 在已最大化視窗
+    上會把它縮成普通大小！只有 IsIconic(hwnd)=true（最小化）時才用 SW_SHOWMAXIMIZED
+    還原並最大化；非最小化狀態完全不動視窗，只 SetForegroundWindow，保留原本最大化。
     """
     try:
         import ctypes
@@ -256,8 +260,10 @@ def _bring_chrome_to_foreground():
         # SetForegroundWindow 在非前景程序呼叫會失敗，先按 Alt 取得權限
         pyautogui.keyDown("alt")
         pyautogui.keyUp("alt")
-        # SW_RESTORE = 9：若 Chrome 被最小化先還原
-        user32.ShowWindow(chrome_hwnd[0], 9)
+        # 只在最小化時還原為最大化；其他狀態（普通/已最大化）保持不動，避免把
+        # 最大化視窗縮成普通大小（SW_RESTORE=9 在最大化視窗上會「還原」成原始尺寸）
+        if user32.IsIconic(chrome_hwnd[0]):
+            user32.ShowWindow(chrome_hwnd[0], 3)  # SW_SHOWMAXIMIZED
         user32.SetForegroundWindow(chrome_hwnd[0])
         time.sleep(0.3)
         return True
@@ -268,17 +274,27 @@ def _bring_chrome_to_foreground():
 
 def _click_chrome_allow_button():
     """點擊 Chrome 站台權限對話框「允許」按鈕（固定螢幕座標 (322, 197)）。
-    對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳，
-    所以這個動作是冪等的（沒對話框時點空地也無傷）。
+    對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳。
 
-    先把 Chrome 拉到最上層（_bring_chrome_to_foreground），否則 pyautogui 在
-    click_document 階段（Chrome 已失焦）會把點擊送到 VSCode/PowerShell 視窗。
+    流程：
+    1. 把 Chrome 拉到最上層（_bring_chrome_to_foreground），否則 pyautogui 在
+       click_document 階段（Chrome 已失焦）會把點擊送到 VSCode/PowerShell 視窗
+    2. **先檢查 (322, 197) 像素是否為允許按鈕的藍底色再決定要不要點**。授權後
+       對話框不再跳，那個座標可能是分頁列/網頁內容/工具列，盲點會亂點到其他
+       東西（之前出現的「鼠標亂點」bug）。Chrome 允許按鈕底色約 #1A73E8，用
+       r<80 且 80<g<180 且 b>200 判斷藍色。
     """
     _bring_chrome_to_foreground()
     time.sleep(0.5)
     try:
+        r, g, b = pyautogui.pixel(322, 197)
+        is_blue_allow_button = (r < 80 and 80 < g < 180 and b > 200)
+        if not is_blue_allow_button:
+            print(f"      (322,197) RGB=({r},{g},{b}) 非允許按鈕藍底色，無對話框，跳過點擊（避免亂點）")
+            return
         pyautogui.moveTo(322, 197, duration=0.1)
         pyautogui.click()
+        print("      OK：已點允許")
     except Exception as e:
         print(f"      pyautogui 點擊失敗：{e}")
 
