@@ -10,28 +10,38 @@ main.py
 執行後跑指定 FEATURE，結束即回到原本的 PowerShell / CMD 視窗（不再進入選單迴圈）。
 """
 
+import os
 import subprocess
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 
 
-def _force_close_all_chrome():
-    """強制終止所有 chrome.exe 與 chromedriver.exe，避免 profile 鎖定或殘留狀態。
-    ⚠️ 警告：此動作會關掉使用者所有 Chrome 視窗（含其他 profile 的工作中分頁），
-    若需保留個人 Chrome 工作，請改用 scripts/close-profile2-chrome.ps1（只關 Selenium 相關）。
+def _close_selenium_chrome_only():
+    """只關閉 Selenium 相關的 chrome.exe + chromedriver.exe，不動使用者個人 Chrome。
+
+    委派給 scripts/close-profile2-chrome.ps1：該腳本用 Get-CimInstance 過濾 command line，
+    只殺帶 --user-data-dir=*Chrome-Selenium*、--remote-debugging-port 或 --test-type=webdriver
+    的程序，並先 CloseMainWindow 優雅關閉再強制終止，順帶清 profile lockfile。
+    這樣個人 Chrome 不會被強殺，下次手動打開不會跳「未正確關閉，要還原網頁嗎？」對話框。
     """
-    for img in ("chrome.exe", "chromedriver.exe"):
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", img],
-                capture_output=True, timeout=10,
-            )
-        except Exception:
-            pass
+    script_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "scripts", "close-profile2-chrome.ps1",
+    )
+    if not os.path.isfile(script_path):
+        print(f"[WARN] 找不到 {script_path}，跳過 Chrome 預清理")
+        return
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
+            capture_output=True, timeout=30,
+        )
+    except Exception as e:
+        print(f"[WARN] Chrome 預清理失敗：{e}")
 
 
-_force_close_all_chrome()
+_close_selenium_chrome_only()
 
 from taipeion_login import login_taipeion
 from taipeion_login_selenium import login_taipeion_selenium
