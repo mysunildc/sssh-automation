@@ -14,6 +14,7 @@ document_system.py
 helper（_open_first_document、_handle_document_list 等）。
 """
 
+import re
 import sys
 import time
 
@@ -37,6 +38,92 @@ URGENT_MSG_XPATHS = [
     "//*[normalize-space()='催辦訊息']",
     "//*[contains(normalize-space(), '催辦訊息')]",
 ]
+
+
+def _get_urgent_message_count(driver, timeout=10):
+    """讀「催辦訊息」badge 後面的數字。
+
+    DOM 不確定是「催辦訊息」與「N」分在兩個 span 還是同一個 text node，所以雙策略：
+    1. 找含「催辦訊息」的最內層元素 → 用 regex 抓自身 text 裡「催辦訊息」後面的數字
+       （能 cover「催辦訊息0」同 text node 與 a/span 包子 span 的兩種情況）
+    2. 策略 1 抓不到 → 學 click_document._get_document_count 在 label 周邊找純數字元素
+
+    回傳：
+        int >= 0 → 判讀成功
+        -1       → 找不到 label / 無法 parse（呼叫端保守不點）
+    """
+    wait = WebDriverWait(driver, timeout)
+    label_xpath = "//*[contains(normalize-space(), '催辦訊息')]"
+    try:
+        candidates = wait.until(EC.presence_of_all_elements_located((By.XPATH, label_xpath)))
+    except TimeoutException:
+        print("[WARN] 找不到「催辦訊息」label，無法判讀數字")
+        return -1
+
+    # 取最內層元素：自身含「催辦訊息」字串、但沒有後代元素也含此字串。
+    # 用 contains(normalize-space()) 抓會把所有外層 ancestor 也抓進來，要過濾。
+    label_el = None
+    for el in candidates:
+        try:
+            if not el.is_displayed():
+                continue
+            inner = el.find_elements(By.XPATH, ".//*[contains(normalize-space(), '催辦訊息')]")
+            if not inner:
+                label_el = el
+                break
+        except Exception:
+            continue
+    if label_el is None:
+        # 沒找到「葉子」元素，退一步用第一個 candidate
+        label_el = candidates[0] if candidates else None
+    if label_el is None:
+        print("[WARN] 找不到可用的「催辦訊息」label 元素")
+        return -1
+
+    # 策略 1：label 自身 text 內 regex 抓「催辦訊息」後面的數字（容許千分位逗號）
+    try:
+        txt = (label_el.text or "").strip()
+        m = re.search(r'催辦訊息\s*([\d,]+)', txt)
+        if m:
+            n = int(m.group(1).replace(",", ""))
+            print(f"      OK：讀到催辦訊息數 = {n}（來源文字「{txt}」）")
+            return n
+    except Exception:
+        pass
+
+    # 策略 2：label 周邊找純數字元素（同 click_document._get_document_count 邏輯）
+    relative_xpaths = [
+        "./following-sibling::*[1]",
+        "./parent::*/*[self::span or self::div or self::strong or self::b or self::p]",
+        "./parent::*/parent::*//*[self::span or self::div or self::strong or self::b or self::p]",
+    ]
+    seen_ids = set()
+    for rel_xp in relative_xpaths:
+        try:
+            els = label_el.find_elements(By.XPATH, rel_xp)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                el_id = el.id if hasattr(el, "id") else id(el)
+                if el_id in seen_ids:
+                    continue
+                seen_ids.add(el_id)
+                if not el.is_displayed():
+                    continue
+                txt = (el.text or "").strip()
+                if not txt or txt == "催辦訊息":
+                    continue
+                m = re.fullmatch(r"[\d,]+", txt)
+                if m:
+                    n = int(txt.replace(",", ""))
+                    print(f"      OK：讀到催辦訊息數 = {n}（來源文字「{txt}」）")
+                    return n
+            except Exception:
+                continue
+
+    print("[WARN] 找到「催辦訊息」label 但無法 parse 數字")
+    return -1
 
 
 def _click_urgent_message(driver, timeout=10):
@@ -68,11 +155,13 @@ def _click_urgent_message(driver, timeout=10):
 def process_document_system(driver):
     """公文系統處理主入口。driver 必須已導航到 edoc 公文首頁。
 
-    流程（第一版）：
+    流程：
         1. 確認 current_url 在 edoc.gov.taipei
-        2. 點「催辦訊息」
-        3. sleep 2 等頁面反應，印當前 URL/title 觀察
-    回傳 True 表示流程跑完；False 表示前置檢查或點擊失敗。
+        2. 讀「催辦訊息」待辦數
+           - = 0：無待辦，跳過點擊，回 True（流程正常完成）
+           - > 0：點進催辦頁，sleep 2 印 URL/title 觀察
+           - 判讀失敗 (-1)：保守不點，回 False（同 click_document_card 策略）
+    回傳 True 表示流程跑完；False 表示前置檢查失敗或判讀失敗或點擊失敗。
     """
     print("[document_system] 開始處理公文系統...")
 
@@ -86,7 +175,18 @@ def process_document_system(driver):
         print(f"[ERROR] 當前 URL 不在 edoc：{current}")
         return False
 
-    print("[document_system] 點選「催辦訊息」...")
+    print("[document_system] 讀「催辦訊息」待辦數...")
+    count = _get_urgent_message_count(driver)
+
+    if count == 0:
+        print("[document_system] 催辦訊息 = 0，無待辦催辦，跳過點擊。")
+        print("[完成] 公文系統處理流程結束。")
+        return True
+    if count < 0:
+        print("[document_system] 無法判讀催辦訊息數，保守不點，請手動處理。")
+        return False
+
+    print(f"[document_system] 催辦訊息 = {count}，點選進入催辦頁...")
     if not _click_urgent_message(driver):
         return False
 
