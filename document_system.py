@@ -700,7 +700,7 @@ def _click_signoff_button(driver, timeout=10):
     return False
 
 
-def _click_first_document_in_pending(driver, timeout=15):
+def _click_first_document_in_pending(driver, timeout=5):
     """點承辦中清單最上方的公文（公文文號 column 第一筆連結）。
 
     edoc 承辦中頁顯示一個表格，欄位序號/簽核/收文/狀別/速別/公文文號/送件時間/...
@@ -733,107 +733,80 @@ def _click_first_document_in_pending(driver, timeout=15):
             return False
         return any(c.isalpha() for c in text) and any(c.isdigit() for c in text)
 
-    # 主策略：text pattern in <a>
+    # 三策略合一 JS:a text pattern -> any element text pattern -> column-index,
+    # 每輪一次 query 跑完三個、命中即返 {el, strategy}。原本三策略各自獨立 while/if
+    # 結構會在主策略永遠失敗(這個系統 MWAA 不是 <a>)時白等整個 timeout 才跳
+    # fallback。合一後每輪 0.3s 都試三個,幾乎立即命中。
+    js_combined = """
+        var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
+        // S1: <a> text pattern
+        var anchors = document.querySelectorAll('a');
+        for (var i = 0; i < anchors.length; i++) {
+            var a = anchors[i];
+            var text = (a.textContent || '').trim();
+            if (text.length >= 8 && pat.test(text) && a.offsetParent !== null) {
+                return {el: a, strategy: 'text pattern (a)'};
+            }
+        }
+        // S2: any visible element with text pattern (leaf only)
+        var all = document.querySelectorAll('a, span, td, div, input, button');
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.offsetParent === null) continue;
+            var text = (el.tagName === 'INPUT' ? (el.value || '') : (el.textContent || '')).trim();
+            if (text.length < 8 || !pat.test(text)) continue;
+            var hasSameTextChild = false;
+            var kids = el.querySelectorAll('*');
+            for (var k = 0; k < kids.length; k++) {
+                var ct = (kids[k].textContent || kids[k].value || '').trim();
+                if (ct === text) { hasSameTextChild = true; break; }
+            }
+            if (hasSameTextChild) continue;
+            return {el: el, strategy: 'text pattern (any element)'};
+        }
+        // S3: column-index by "公文文號" th
+        var ths = document.querySelectorAll('th');
+        for (var i = 0; i < ths.length; i++) {
+            if ((ths[i].textContent || '').trim().indexOf('公文文號') === -1) continue;
+            var headerRow = ths[i].parentElement;
+            if (!headerRow) continue;
+            var idx = -1;
+            for (var j = 0; j < headerRow.children.length; j++) {
+                if (headerRow.children[j] === ths[i]) { idx = j; break; }
+            }
+            if (idx === -1) continue;
+            var table = ths[i].closest('table');
+            if (!table) continue;
+            var rows = table.querySelectorAll('tbody tr');
+            for (var k = 0; k < rows.length; k++) {
+                var cells = rows[k].children;
+                if (idx >= cells.length) continue;
+                var cell = cells[idx];
+                if (cell.tagName !== 'TD') continue;
+                var kids2 = cell.querySelectorAll('*');
+                for (var m = 0; m < kids2.length; m++) {
+                    var ck = kids2[m];
+                    if (ck.offsetParent === null) continue;
+                    var ckt = (ck.textContent || ck.value || '').trim();
+                    if (pat.test(ckt)) return {el: ck, strategy: 'column-index'};
+                }
+                var ct2 = (cell.textContent || '').trim();
+                if (pat.test(ct2)) return {el: cell, strategy: 'column-index'};
+            }
+        }
+        return null;
+    """
+
     while time.time() < deadline:
         try:
-            target = driver.execute_script("""
-                var anchors = document.querySelectorAll('a');
-                var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
-                for (var i = 0; i < anchors.length; i++) {
-                    var a = anchors[i];
-                    var text = (a.textContent || '').trim();
-                    if (text.length < 8) continue;
-                    if (!pat.test(text)) continue;
-                    if (a.offsetParent === null) continue;
-                    return a;
-                }
-                return null;
-            """)
-            if target:
-                strategy = "text pattern (a)"
+            result = driver.execute_script(js_combined)
+            if result:
+                target = result['el']
+                strategy = result['strategy']
                 break
         except Exception as e:
-            print(f"      x  JS text-pattern (a) find 例外：{type(e).__name__}: {e}")
-        time.sleep(0.5)
-
-    # Fallback 1：text pattern in any element — MWAA 可能不是 <a>，而是 <span>/
-    # <input>/<td> 等做成 link 樣式的元素。掃所有元素的 textContent 或 value。
-    if not target:
-        print("      x  <a> 內找不到公文號，掃所有元素 textContent / value...")
-        try:
-            target = driver.execute_script("""
-                var all = document.querySelectorAll('a, span, td, div, input, button');
-                var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
-                for (var i = 0; i < all.length; i++) {
-                    var el = all[i];
-                    if (el.offsetParent === null) continue;
-                    var text;
-                    if (el.tagName === 'INPUT') {
-                        text = (el.value || '').trim();
-                    } else {
-                        text = (el.textContent || '').trim();
-                    }
-                    if (text.length < 8) continue;
-                    if (!pat.test(text)) continue;
-                    // 葉子節點優先（避免命中包含同 text 的外殼 div / td）
-                    var hasSameTextChild = false;
-                    var kids = el.querySelectorAll('*');
-                    for (var k = 0; k < kids.length; k++) {
-                        var ct = (kids[k].textContent || kids[k].value || '').trim();
-                        if (ct === text) { hasSameTextChild = true; break; }
-                    }
-                    if (hasSameTextChild) continue;
-                    return el;
-                }
-                return null;
-            """)
-            if target:
-                strategy = "text pattern (any element)"
-        except Exception as e:
-            print(f"      x  JS text-pattern (any) find 例外：{type(e).__name__}: {e}")
-
-    # Fallback 2：JS column-index，cell 內找含公文號 pattern 的子元素
-    if not target:
-        print("      x  text pattern 全部沒命中，試 column-index fallback...")
-        try:
-            target = driver.execute_script("""
-                var ths = document.querySelectorAll('th');
-                for (var i = 0; i < ths.length; i++) {
-                    var thText = (ths[i].textContent || '').trim();
-                    if (thText.indexOf('公文文號') === -1) continue;
-                    var headerRow = ths[i].parentElement;
-                    if (!headerRow) continue;
-                    var idx = -1;
-                    for (var j = 0; j < headerRow.children.length; j++) {
-                        if (headerRow.children[j] === ths[i]) { idx = j; break; }
-                    }
-                    if (idx === -1) continue;
-                    var table = ths[i].closest('table');
-                    if (!table) continue;
-                    var rows = table.querySelectorAll('tbody tr');
-                    var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
-                    for (var k = 0; k < rows.length; k++) {
-                        var cells = rows[k].children;
-                        if (idx >= cells.length) continue;
-                        var cell = cells[idx];
-                        if (cell.tagName !== 'TD') continue;
-                        var kids = cell.querySelectorAll('*');
-                        for (var m = 0; m < kids.length; m++) {
-                            var ck = kids[m];
-                            if (ck.offsetParent === null) continue;
-                            var ckt = (ck.textContent || ck.value || '').trim();
-                            if (pat.test(ckt)) return ck;
-                        }
-                        var ct = (cell.textContent || '').trim();
-                        if (pat.test(ct)) return cell;
-                    }
-                }
-                return null;
-            """)
-            if target:
-                strategy = "column-index"
-        except Exception as e:
-            print(f"      x  JS column-index find 例外：{type(e).__name__}: {e}")
+            print(f"      x  JS find 例外:{type(e).__name__}: {e}")
+        time.sleep(0.3)
 
     # 命中後 verify + click
     if target:
@@ -1083,7 +1056,8 @@ def _run_sidebar_cascade(driver):
             if not _click_sidebar_item(driver, label):
                 print(f"[document_system] 點「{label}」失敗，請手動處理。")
                 return True  # 點失敗仍視為「有處理過」，主流程走 [完成]
-            time.sleep(2)
+            # 短 sleep — handler_fn (pending_doc 等) 內有自己的輪詢等 frame 載入
+            time.sleep(0.5)
             try:
                 print(f"[document_system] {label}頁 URL：{driver.current_url}")
                 print(f"[document_system] {label}頁標題：{driver.title}")
@@ -1130,7 +1104,8 @@ def pending_doc(driver):
         return False
 
     # 點公文後系統可能就地 frame 切到公文內容、或開新分頁、或彈 modal。
-    time.sleep(3)
+    # 短 sleep 給新 window 開啟非同步完成 — Chrome 開 window ~ 0.3-0.5s
+    time.sleep(1)
     try:
         print(f"[pending_doc] 點開後 URL：{driver.current_url}")
         print(f"[pending_doc] 點開後標題：{driver.title}")
