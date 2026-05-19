@@ -1115,8 +1115,12 @@ def pending_doc(driver):
     except Exception as e:
         print(f"[pending_doc] 讀狀態失敗：{type(e).__name__}: {e}")
 
-    # 切回主文件供後續可能的操作
+    # 切回主文件,chain 給 pending_doc_handler 處理新分頁(公文閱覽器)。
+    # 「點完公文 + 新視窗開啟後」的處理 delegate 給獨立模組,方便階段測試
+    # 與職責切割。handle_opened_document 內會切到新 window 做後續動作。
     driver.switch_to.default_content()
+    from pending_doc_handler import handle_opened_document
+    handle_opened_document(driver)
     return True
 
 
