@@ -189,6 +189,60 @@ def _wait_for_login_button(driver, max_retries=2, interval=3.0):
     return False
 
 
+_LOG_FILE_HANDLE = None  # 模組層保留 file handle 避免 GC 提早關閉
+
+
+def _setup_stdout_logging(filename="run.log"):
+    """把 stdout/stderr 同時印到螢幕與 <filename>（與本檔同目錄）。每次跑覆寫舊內容。
+
+    用途：Python print 輸出原本只在終端機 scrollback，關視窗就消失，無法事後讀取
+    來除錯。包一層 Tee 落地後，下次出問題使用者只要說「跑過了你去看 run.log」我
+    就能用 Read tool 直接讀，不用手動 Pipe。
+
+    呼叫時機：在 entry point script (main.py / document_system.py standalone) 啟動
+    最開頭呼叫一次。底層用 module-level _LOG_FILE_HANDLE 保留 file 引用避免 GC，
+    Python 程序退出時自動 close。
+
+    限制：sys.stdout.reconfigure(...) 在 wrap 後會作用在原 stream 上，建議在
+    呼叫本函式前先 reconfigure。
+    """
+    global _LOG_FILE_HANDLE
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    _LOG_FILE_HANDLE = open(log_path, "w", encoding="utf-8")
+
+    class _Tee:
+        def __init__(self, original, file_handle):
+            self._original = original
+            self._file = file_handle
+
+        def write(self, data):
+            try:
+                self._original.write(data)
+            except Exception:
+                pass
+            try:
+                self._file.write(data)
+                self._file.flush()
+            except Exception:
+                pass
+
+        def flush(self):
+            for s in (self._original, self._file):
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+
+        def __getattr__(self, name):
+            # 其他屬性（encoding / fileno / reconfigure 等）forward 到原 stream
+            return getattr(self._original, name)
+
+    import sys as _sys
+    _sys.stdout = _Tee(_sys.stdout, _LOG_FILE_HANDLE)
+    _sys.stderr = _Tee(_sys.stderr, _LOG_FILE_HANDLE)
+    print(f"[logging] stdout/stderr 同步落地到 {log_path}")
+
+
 def _close_selenium_chrome_only():
     """只關閉 Selenium 相關的 chrome.exe + chromedriver.exe，不動使用者個人 Chrome。
 

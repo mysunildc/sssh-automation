@@ -586,6 +586,10 @@ def _standalone_open_chrome_at_edoc():
 
 
 if __name__ == "__main__":
+    # 把 stdout/stderr 同步落地到 run.log — entry point 開頭就 setup，確保 Chrome
+    # 預清理 / 啟動 / 導航等每行 print 都進 log
+    from taipeion_login_selenium import _setup_stdout_logging
+    _setup_stdout_logging()
     driver = _standalone_open_chrome_at_edoc()
     if driver is None:
         sys.exit(1)

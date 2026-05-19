@@ -14,10 +14,18 @@ import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-from taipeion_login_selenium import login_taipeion_selenium, _close_selenium_chrome_only
+from taipeion_login_selenium import (
+    login_taipeion_selenium,
+    _close_selenium_chrome_only,
+    _setup_stdout_logging,
+)
 from taipeion_login import login_taipeion
 from click_document import click_document_card
 
+# 先把 stdout/stderr 落地到 run.log（與 main.py 同目錄）— 之後所有 print 都會
+# 同步寫進去，下次出問題直接讀檔，不用手動 pipe。在 _close_selenium_chrome_only
+# 之前 setup，確保連預清理的 [WARN] 都進 log。
+_setup_stdout_logging()
 _close_selenium_chrome_only()
 
 # ── 功能清單 ──────────────────────────────────────────────────────────────────
