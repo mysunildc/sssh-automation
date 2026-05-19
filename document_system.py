@@ -49,6 +49,26 @@ PENDING_SIGNOFF_XPATHS = [
     "//*[contains(normalize-space(), '待簽收')]",
 ]
 
+# 待簽收清單表頭的「全選 checkbox」XPath 候選（緊鄰「序號」欄位的 input）。
+SELECT_ALL_CHECKBOX_XPATHS = [
+    "//tr[.//th[contains(normalize-space(), '序號')]]//input[@type='checkbox']",
+    "//th[contains(normalize-space(), '序號')]/preceding-sibling::th[1]//input[@type='checkbox']",
+    "//th[contains(normalize-space(), '序號')]//input[@type='checkbox']",
+    "//thead//input[@type='checkbox']",
+    # 最後 fallback：頁面上第一個 checkbox（風險較高，最後才試）
+    "(//input[@type='checkbox'])[1]",
+]
+
+# 表格上方亮青色「簽收」按鈕 XPath 候選。需精確匹配「簽收」避免誤點旁邊的「退文」。
+SIGNOFF_BUTTON_XPATHS = [
+    "//button[normalize-space()='簽收']",
+    "//a[normalize-space()='簽收']",
+    "//input[@type='button' and @value='簽收']",
+    "//*[normalize-space()='簽收' and (self::button or @role='button')]",
+    "//*[normalize-space()='簽收']/ancestor::button[1]",
+    "//*[normalize-space()='簽收']/ancestor::a[1]",
+]
+
 
 def _get_urgent_message_count(driver, timeout=10):
     """讀「催辦訊息」badge 後面的數字。
@@ -245,6 +265,65 @@ def _click_pending_signoff(driver, timeout=10):
     return False
 
 
+def _check_select_all(driver, timeout=10):
+    """勾選待簽收清單表頭的「全選 checkbox」（緊鄰「序號」欄位）。
+
+    為了 idempotency：先讀 `el.is_selected()`，若已勾選就不動（直接點會反選）。
+    點完再驗證一次狀態確認真的勾上去了。
+    回傳 True 表示最終狀態為「已勾選」，False 表示所有 XPath 都失敗或點完仍未勾選。
+    """
+    wait = WebDriverWait(driver, timeout)
+    for xp in SELECT_ALL_CHECKBOX_XPATHS:
+        try:
+            el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
+            if not el.is_displayed():
+                continue
+            if el.is_selected():
+                print(f"      OK：全選 checkbox 已是勾選狀態（XPath: {xp}）")
+                return True
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
+            time.sleep(0.5)
+            if el.is_selected():
+                print(f"      OK：勾選全選 checkbox（XPath: {xp}）")
+                return True
+            print(f"      x  點完仍未勾選（XPath: {xp}），嘗試下一個 fallback")
+        except TimeoutException:
+            continue
+        except Exception as e:
+            print(f"      x  全選 checkbox XPath {xp} 例外：{type(e).__name__}: {e}")
+            continue
+    print("[ERROR] 全選 checkbox 全部 XPath 都失敗")
+    return False
+
+
+def _click_signoff_button(driver, timeout=10):
+    """點選表格上方亮青色的「簽收」按鈕。
+
+    **重要**：這個動作會改變公文狀態（待簽收 → 承辦中），沒有 admin 介入無法復原。
+    呼叫端應於本函式呼叫前印明顯警告。
+
+    回傳 True 表示點到，False 表示所有 XPath 都失敗。
+    """
+    wait = WebDriverWait(driver, timeout)
+    for xp in SIGNOFF_BUTTON_XPATHS:
+        try:
+            el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
+            if not el.is_displayed():
+                continue
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
+            print(f"      OK：點到「簽收」按鈕（XPath: {xp}）")
+            return True
+        except TimeoutException:
+            continue
+        except Exception as e:
+            print(f"      x  「簽收」XPath {xp} 例外：{type(e).__name__}: {e}")
+            continue
+    print("[ERROR] 「簽收」按鈕全部 XPath 都失敗")
+    return False
+
+
 def _click_urgent_message(driver, timeout=10):
     """點選 edoc 公文首頁的「催辦訊息」badge。
 
@@ -336,7 +415,26 @@ def process_document_system(driver):
         except Exception as e:
             print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
 
-    # TODO: 後續工作（讀待簽收清單、逐筆點進公文簽收等）在此擴充
+        # 待簽收清單載入後：勾全選 → 點簽收按鈕
+        # **警告**：簽收會改變公文狀態（待簽收 → 承辦中），無 admin 介入無法復原
+        print(f"[WARN] 即將自動執行：勾選 {signoff_count} 筆待簽收 + 點「簽收」按鈕")
+        print(f"[WARN] 簽收會把公文從「待簽收」狀態改為「承辦中」，無法復原")
+        if not _check_select_all(driver):
+            print("[document_system] 全選 checkbox 失敗，不執行簽收。請手動處理。")
+        else:
+            if not _click_signoff_button(driver):
+                print("[document_system] 找不到「簽收」按鈕，請手動處理。")
+            else:
+                # 簽收後等系統回應（可能跳 JS confirm 由 unhandledPromptBehavior=accept
+                # 自動接受、或跳轉到下一頁、或就地刷新清單）
+                time.sleep(3)
+                try:
+                    print(f"[document_system] 簽收後 URL：{driver.current_url}")
+                    print(f"[document_system] 簽收後標題：{driver.title}")
+                except Exception as e:
+                    print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+
+    # TODO: 後續工作（逐筆點進公文做承辦動作、退文判斷等）在此擴充
     print("[完成] 公文系統處理流程結束。")
     return True
 
