@@ -39,15 +39,9 @@ URGENT_MSG_XPATHS = [
     "//*[contains(normalize-space(), '催辦訊息')]",
 ]
 
-# 左側 sidebar「待簽收(N)」menu item 的 XPath 候選。文字格式為「待簽收(1)」，
-# 不像催辦訊息的「催辦訊息0」，數字外有括號。
-PENDING_SIGNOFF_XPATHS = [
-    "//a[contains(normalize-space(), '待簽收')]",
-    "//*[contains(normalize-space(), '待簽收')]/ancestor::a[1]",
-    "//*[contains(normalize-space(), '待簽收')]/ancestor::*[@role='link' or @role='menuitem' or @role='button'][1]",
-    "//*[contains(normalize-space(), '待簽收')]/ancestor::li[1]",
-    "//*[contains(normalize-space(), '待簽收')]",
-]
+# （左側 sidebar 各項 menu item 「<label>(N)」格式的 XPath 由
+#  _click_sidebar_item / _get_sidebar_paren_count 內部動態組裝，不再用 hardcoded
+#  常數。原 PENDING_SIGNOFF_XPATHS 移除）
 
 # 待簽收清單表頭的「全選 checkbox」XPath 候選（緊鄰「序號」欄位的 input）。
 SELECT_ALL_CHECKBOX_XPATHS = [
@@ -170,24 +164,26 @@ def _get_urgent_message_count(driver, timeout=10):
     return -1
 
 
-def _get_pending_signoff_count(driver, timeout=10):
-    """讀左側 sidebar「待簽收(N)」的 N。格式有括號，例如「待簽收(1)」。
+def _get_sidebar_paren_count(driver, label, timeout=10):
+    """讀左側 sidebar「<label>(N)」格式的數字，例如「待簽收(1)」、「承辦中(2)」、
+    「受會案件(0)」、「待結案(0)」。
 
-    策略與 _get_urgent_message_count 同：先找含「待簽收」字串的最內層元素，再
-    1. regex 抓「待簽收\\s*(\\s*([\\d,]+)\\s*)」
-    2. fallback 在 sibling / parent 找純數字元素（少見，因為待簽收的數字幾乎
-       一定跟著 label 在同一個 text node）
+    Generic 版本，給所有 paren-format 的 sidebar item 用。雙策略：
+    1. 找含 <label> 字串的最內層元素 → regex 抓「<label>\\s*(\\s*([\\d,]+)\\s*)」
+    2. 策略 1 抓不到 → 在 sibling/parent 找鄰近的純數字元素
 
     回傳：
         int >= 0 → 判讀成功
         -1       → 找不到 label / 無法 parse（呼叫端保守不點）
     """
     wait = WebDriverWait(driver, timeout)
-    label_xpath = "//*[contains(normalize-space(), '待簽收')]"
+    # XPath 用 string concat 而非 f-string 避免中文 label 內含單引號的風險
+    # (本專案 cascade 用的 label「待簽收/承辦中/受會案件/待結案」皆無)
+    label_xpath = "//*[contains(normalize-space(), '" + label + "')]"
     try:
         candidates = wait.until(EC.presence_of_all_elements_located((By.XPATH, label_xpath)))
     except TimeoutException:
-        print("[WARN] 找不到「待簽收」label，無法判讀數字")
+        print(f"[WARN] 找不到「{label}」label，無法判讀數字")
         return -1
 
     label_el = None
@@ -195,7 +191,8 @@ def _get_pending_signoff_count(driver, timeout=10):
         try:
             if not el.is_displayed():
                 continue
-            inner = el.find_elements(By.XPATH, ".//*[contains(normalize-space(), '待簽收')]")
+            inner = el.find_elements(
+                By.XPATH, ".//*[contains(normalize-space(), '" + label + "')]")
             if not inner:
                 label_el = el
                 break
@@ -204,16 +201,16 @@ def _get_pending_signoff_count(driver, timeout=10):
     if label_el is None:
         label_el = candidates[0] if candidates else None
     if label_el is None:
-        print("[WARN] 找不到可用的「待簽收」label 元素")
+        print(f"[WARN] 找不到可用的「{label}」label 元素")
         return -1
 
-    # 策略 1：regex 抓「待簽收(N)」括號內數字
+    # 策略 1：regex 抓「<label>(N)」括號內數字
     try:
         txt = (label_el.text or "").strip()
-        m = re.search(r'待簽收\s*\(\s*([\d,]+)\s*\)', txt)
+        m = re.search(re.escape(label) + r'\s*\(\s*([\d,]+)\s*\)', txt)
         if m:
             n = int(m.group(1).replace(",", ""))
-            print(f"      OK：讀到待簽收數 = {n}（來源文字「{txt}」）")
+            print(f"      OK：讀到{label}數 = {n}（來源文字「{txt}」）")
             return n
     except Exception:
         pass
@@ -239,44 +236,61 @@ def _get_pending_signoff_count(driver, timeout=10):
                 if not el.is_displayed():
                     continue
                 txt = (el.text or "").strip()
-                if not txt or txt == "待簽收":
+                if not txt or txt == label:
                     continue
-                # 容許 "(1)" 或純 "1"
                 m = re.fullmatch(r"\(?\s*([\d,]+)\s*\)?", txt)
                 if m:
                     n = int(m.group(1).replace(",", ""))
-                    print(f"      OK：讀到待簽收數 = {n}（來源文字「{txt}」）")
+                    print(f"      OK：讀到{label}數 = {n}（來源文字「{txt}」）")
                     return n
             except Exception:
                 continue
 
-    print("[WARN] 找到「待簽收」label 但無法 parse 數字")
+    print(f"[WARN] 找到「{label}」label 但無法 parse 數字")
     return -1
 
 
-def _click_pending_signoff(driver, timeout=10):
-    """點選左側 sidebar「待簽收」menu item。
+def _click_sidebar_item(driver, label, timeout=10):
+    """點 sidebar menu item，文字含 <label>。Generic 版本，給 sidebar cascade 用。
 
-    回傳 True 表示點到，False 表示所有 XPath 都失敗。同 _click_urgent_message
-    套路，JS click 繞遮罩。
+    XPath 由窄到寬：<a> → 含 label 的元素 ancestor::a → role=link/menuitem/button →
+    ancestor::li → 直接命中含 label 的元素。JS click 繞遮罩。
     """
     wait = WebDriverWait(driver, timeout)
-    for xp in PENDING_SIGNOFF_XPATHS:
+    xpaths = [
+        "//a[contains(normalize-space(), '" + label + "')]",
+        "//*[contains(normalize-space(), '" + label + "')]/ancestor::a[1]",
+        "//*[contains(normalize-space(), '" + label + "')]/ancestor::*[@role='link' or @role='menuitem' or @role='button'][1]",
+        "//*[contains(normalize-space(), '" + label + "')]/ancestor::li[1]",
+        "//*[contains(normalize-space(), '" + label + "')]",
+    ]
+    for xp in xpaths:
         try:
             el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
             if not el.is_displayed():
                 continue
             driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
-            print(f"      OK：點到「待簽收」（XPath: {xp}）")
+            print(f"      OK：點到「{label}」（XPath: {xp}）")
             return True
         except TimeoutException:
             continue
         except Exception as e:
-            print(f"      x  「待簽收」XPath {xp} 例外：{type(e).__name__}: {e}")
+            print(f"      x  「{label}」XPath {xp} 例外：{type(e).__name__}: {e}")
             continue
-    print("[ERROR] 「待簽收」全部 XPath 都失敗")
+    print(f"[ERROR] 「{label}」全部 XPath 都失敗")
     return False
+
+
+# 既有 specific helper 改 delegate generic，保留呼叫端的 import 接口
+def _get_pending_signoff_count(driver, timeout=10):
+    """讀「待簽收(N)」的 N。Delegate 給 _get_sidebar_paren_count。"""
+    return _get_sidebar_paren_count(driver, "待簽收", timeout=timeout)
+
+
+def _click_pending_signoff(driver, timeout=10):
+    """點「待簽收」sidebar menu item。Delegate 給 _click_sidebar_item。"""
+    return _click_sidebar_item(driver, "待簽收", timeout=timeout)
 
 
 def _switch_to_signoff_frame(driver, timeout=15):
@@ -785,8 +799,84 @@ def process_document_system(driver):
             # 切回主文件，後續操作（若有）才正常
             driver.switch_to.default_content()
 
-    # TODO: 後續工作（逐筆點進公文做承辦動作、退文判斷等）在此擴充
-    print("[完成] 公文系統處理流程結束。")
+    # ── Sidebar cascade：承辦中 → 受會案件 → 待結案 ──────────────────────
+    # 走到這代表 待簽收 階段已處理完畢（signoff 或 skip）。接下來檢查 sidebar 的
+    # 其他三個項目，依序看哪個有待辦：第一個 count > 0 的項目就點入並呼叫對應的
+    # 處理函式（pending_doc / circulate_doc / pending_closeout_doc）。三個都 0
+    # 就印「無公文待處理」當終點。
+    if _run_sidebar_cascade(driver):
+        # cascade 點入某項目並呼叫了 handler；流程到此完成
+        print("[完成] 公文系統處理流程結束。")
+    # else: cascade 印「無公文待處理」當最後一行，不再多印 [完成]
+    return True
+
+
+def _run_sidebar_cascade(driver):
+    """處理 sidebar 的「承辦中 → 受會案件 → 待結案」三段串聯。
+
+    依序檢查每個項目的 count：
+    - > 0：點入該項目，呼叫對應 handler（pending_doc / circulate_doc /
+           pending_closeout_doc），return True
+    - == 0：印「= 0，跳過」，看下一個
+    - 判讀失敗 (-1)：印警告，看下一個
+
+    三項都 0 / 判讀失敗 → 印「無公文待處理」（最後一行），return False。
+    """
+    cascade = [
+        ("承辦中", pending_doc),
+        ("受會案件", circulate_doc),
+        ("待結案", pending_closeout_doc),
+    ]
+    for label, handler_fn in cascade:
+        print(f"[document_system] 讀左側 sidebar「{label}」數...")
+        count = _get_sidebar_paren_count(driver, label)
+        if count > 0:
+            print(f"[document_system] {label} = {count}，點選進入...")
+            if not _click_sidebar_item(driver, label):
+                print(f"[document_system] 點「{label}」失敗，請手動處理。")
+                return True  # 點失敗仍視為「有處理過」，主流程走 [完成]
+            time.sleep(2)
+            try:
+                print(f"[document_system] {label}頁 URL：{driver.current_url}")
+                print(f"[document_system] {label}頁標題：{driver.title}")
+            except Exception as e:
+                print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+            handler_fn(driver)
+            return True
+        if count == 0:
+            print(f"[document_system] {label} = 0，跳過。")
+        else:
+            print(f"[document_system] 無法判讀{label}數，繼續下一個。")
+    # 三個都沒事 → 工作完成
+    print("無公文待處理")
+    return False
+
+
+def pending_doc(driver):
+    """承辦中公文處理流程。第一版只印 TODO，後續擴充實際的承辦動作。
+
+    呼叫時機：點入 sidebar「承辦中」menu 之後。driver 此時的內容區（dTreeContent
+    iframe）會顯示承辦中清單，本函式負責後續流程。
+    """
+    _ = driver  # 保留 signature 供後續實作（切 frame、讀清單、逐筆處理）使用
+    print("[pending_doc] 承辦中公文處理流程開始（尚未實作）")
+    print("[pending_doc] TODO: 切到內容 frame、讀承辦中清單、逐筆處理（檢視/簽辦/送件）")
+    return True
+
+
+def circulate_doc(driver):
+    """受會案件處理流程。第一版只印 TODO。"""
+    _ = driver  # 同 pending_doc
+    print("[circulate_doc] 受會案件處理流程開始（尚未實作）")
+    print("[circulate_doc] TODO: 切到內容 frame、讀受會案件清單、逐筆處理")
+    return True
+
+
+def pending_closeout_doc(driver):
+    """待結案處理流程。第一版只印 TODO。"""
+    _ = driver  # 同 pending_doc
+    print("[pending_closeout_doc] 待結案處理流程開始（尚未實作）")
+    print("[pending_closeout_doc] TODO: 切到內容 frame、讀待結案清單、逐筆結案")
     return True
 
 
