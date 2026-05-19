@@ -112,6 +112,10 @@ def _standalone_open_chrome_at_edoc():
     3. driver.get(EDOC_HOME_URL)，sleep 2 後檢查 current_url
     4. 若被導去 login.gov.taipei / sso → session 過期，印提示後回 None
     回傳 driver 或 None。
+
+    注意：失敗路徑 return None 時故意不呼叫 driver.quit() — options 帶 detach=True，
+    Chrome 會留著；下次跑時 _close_selenium_chrome_only 會清掉。與
+    login_taipeion_selenium 的 lifecycle 模式一致。
     """
     from selenium import webdriver
     from selenium.common.exceptions import WebDriverException
@@ -147,7 +151,7 @@ def _standalone_open_chrome_at_edoc():
 
     if "edoc.gov.taipei" not in current:
         print(f"[ERROR] 沒進到 edoc，被導向：{current}")
-        print("        session 可能過期，請先跑 C:\\Python314\\python.exe main.py 重新登入")
+        print("        session 可能過期，請先執行 main.py 重新登入")
         return None
 
     print(f"      OK：已在 edoc — {current}")
