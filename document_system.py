@@ -265,36 +265,110 @@ def _click_pending_signoff(driver, timeout=10):
     return False
 
 
-def _check_select_all(driver, timeout=10):
-    """勾選待簽收清單表頭的「全選 checkbox」（緊鄰「序號」欄位）。
+def _try_check_checkbox(driver, el):
+    """確保單一 checkbox 為勾選狀態，回傳是否成功。
 
-    為了 idempotency：先讀 `el.is_selected()`，若已勾選就不動（直接點會反選）。
-    點完再驗證一次狀態確認真的勾上去了。
-    回傳 True 表示最終狀態為「已勾選」，False 表示所有 XPath 都失敗或點完仍未勾選。
+    已勾就不動（直接點會反選）；未勾就試三種 click strategy：
+      1. Selenium 原生 click
+      2. JS click（繞遮罩、繞 opacity:0）
+      3. JS 直接設 checked=true + dispatch change/click event（cover framework
+         binding 不認原生 click event 的情況，例如 Vue/React 客製 checkbox）
+
+    刻意不檢查 is_displayed() — 很多客製 checkbox 把 input 設成 opacity:0 上面
+    疊自定義 UI，is_displayed 會回 false 但功能正常。
     """
-    wait = WebDriverWait(driver, timeout)
-    for xp in SELECT_ALL_CHECKBOX_XPATHS:
-        try:
-            el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
-            if not el.is_displayed():
-                continue
-            if el.is_selected():
-                print(f"      OK：全選 checkbox 已是勾選狀態（XPath: {xp}）")
-                return True
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
-            time.sleep(0.5)
-            if el.is_selected():
-                print(f"      OK：勾選全選 checkbox（XPath: {xp}）")
-                return True
-            print(f"      x  點完仍未勾選（XPath: {xp}），嘗試下一個 fallback")
-        except TimeoutException:
-            continue
-        except Exception as e:
-            print(f"      x  全選 checkbox XPath {xp} 例外：{type(e).__name__}: {e}")
-            continue
-    print("[ERROR] 全選 checkbox 全部 XPath 都失敗")
+    try:
+        if el.is_selected():
+            return True
+    except Exception:
+        return False
+    # 1. Selenium 原生 click
+    try:
+        el.click()
+        time.sleep(0.15)
+        if el.is_selected():
+            return True
+    except Exception:
+        pass
+    # 2. JS click
+    try:
+        driver.execute_script("arguments[0].click();", el)
+        time.sleep(0.15)
+        if el.is_selected():
+            return True
+    except Exception:
+        pass
+    # 3. JS 設 checked + dispatch
+    try:
+        driver.execute_script(
+            "arguments[0].checked = true;"
+            "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));"
+            "arguments[0].dispatchEvent(new Event('click', {bubbles: true}));",
+            el)
+        time.sleep(0.15)
+        if el.is_selected():
+            return True
+    except Exception:
+        pass
     return False
+
+
+def _check_select_all(driver, timeout=10):
+    """確保「待簽收」清單上所有 checkbox 都呈勾選狀態。
+
+    策略：蒐集頁面上所有相關的 input[type=checkbox]（先 SELECT_ALL_CHECKBOX_XPATHS
+    精確定位，找不到再退讓到「table 內所有」與「頁面所有」），對每個未勾的呼叫
+    _try_check_checkbox 試三種 click strategy。
+
+    為何不只點 header「全選」：實測 header checkbox 行為不確定（custom CSS 把 input
+    設 opacity:0、framework binding 不 cascade、單一 XPath 命不中）。把每個 row 都
+    勾起來是最 robust 的做法，end state 一致為「全部已勾」，不受 header 行為影響。
+
+    回傳 True 表示最終至少一個 checkbox 為勾選狀態。
+    """
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='checkbox']"))
+        )
+    except TimeoutException:
+        print("[ERROR] 頁面上找不到任何 input[type=checkbox]")
+        return False
+
+    # 蒐集候選：精確 XPaths 優先，再 table 內，再全頁
+    candidate_xpaths = SELECT_ALL_CHECKBOX_XPATHS + [
+        "//table//input[@type='checkbox']",
+        "//input[@type='checkbox']",
+    ]
+    seen_ids = set()
+    targets = []
+    for xp in candidate_xpaths:
+        try:
+            for el in driver.find_elements(By.XPATH, xp):
+                el_id = id(el)
+                if el_id not in seen_ids:
+                    seen_ids.add(el_id)
+                    targets.append(el)
+        except Exception:
+            continue
+
+    print(f"      蒐集到 {len(targets)} 個 checkbox 候選，逐個確認/勾選...")
+    successful = 0
+    for el in targets:
+        if _try_check_checkbox(driver, el):
+            successful += 1
+
+    if successful == 0:
+        print("[ERROR] 沒有任何 checkbox 能被勾選。診斷前 10 個元素：")
+        for i, el in enumerate(targets[:10]):
+            try:
+                outer = driver.execute_script("return arguments[0].outerHTML;", el) or ""
+                print(f"      [{i+1}] {outer[:300]}")
+            except Exception as e:
+                print(f"      [{i+1}] dump 失敗：{type(e).__name__}: {e}")
+        return False
+
+    print(f"      OK：{successful}/{len(targets)} 個 checkbox 已為勾選狀態")
+    return True
 
 
 def _click_signoff_button(driver, timeout=10):
