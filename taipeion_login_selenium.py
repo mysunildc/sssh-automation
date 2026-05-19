@@ -21,6 +21,7 @@ Smart Card API，HiCOS 無法讀卡。
 
 import json
 import os
+import subprocess
 import time
 
 import pyautogui
@@ -196,7 +197,6 @@ def _close_selenium_chrome_only():
     的程序，並先 CloseMainWindow 優雅關閉再強制終止，順帶清 profile lockfile。
     這樣個人 Chrome 不會被強殺，下次手動打開不會跳「未正確關閉，要還原網頁嗎？」對話框。
     """
-    import subprocess
     script_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "scripts", "close-profile2-chrome.ps1",
