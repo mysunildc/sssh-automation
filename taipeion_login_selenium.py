@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime
 
 import pyautogui
 from selenium import webdriver
@@ -191,6 +192,49 @@ def _wait_for_login_button(driver, max_retries=2, interval=3.0):
 
 _LOG_FILE_HANDLE = None  # 模組層保留 file handle 避免 GC 提早關閉
 
+# 全域 LOG 規則（C:\Users\ldc\.claude\CLAUDE.md）：
+#  - 每行 LOG 開頭含 ISO 8601 時間戳：YYYY-MM-DDThh:mm:ss
+#  - 檔案 >10MB 時 rotate，最多保留 7 份（current + .1~.6）
+_LOG_MAX_BYTES = 10 * 1024 * 1024
+_LOG_KEEP = 6  # 加上當前那份共 7 份
+
+
+def _rotate_log_if_needed(log_path):
+    """若 log_path 大於 _LOG_MAX_BYTES，做檔名滾動：
+
+        log_path.6 → 刪除
+        log_path.5 → log_path.6
+        ...
+        log_path.1 → log_path.2
+        log_path   → log_path.1
+
+    任何 IO 失敗都 silently skip — log rotate 不該影響主流程。
+    """
+    if not os.path.exists(log_path):
+        return
+    try:
+        if os.path.getsize(log_path) <= _LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    oldest = f"{log_path}.{_LOG_KEEP}"
+    if os.path.exists(oldest):
+        try:
+            os.remove(oldest)
+        except OSError:
+            pass
+    for i in range(_LOG_KEEP - 1, 0, -1):
+        src = f"{log_path}.{i}"
+        if os.path.exists(src):
+            try:
+                os.replace(src, f"{log_path}.{i + 1}")
+            except OSError:
+                pass
+    try:
+        os.replace(log_path, f"{log_path}.1")
+    except OSError:
+        pass
+
 
 def _setup_stdout_logging(filename="run.log"):
     """把 stdout/stderr 同時印到螢幕與 <filename>（與本檔同目錄）。每次跑覆寫舊內容。
@@ -198,6 +242,9 @@ def _setup_stdout_logging(filename="run.log"):
     用途：Python print 輸出原本只在終端機 scrollback，關視窗就消失，無法事後讀取
     來除錯。包一層 Tee 落地後，下次出問題使用者只要說「跑過了你去看 run.log」我
     就能用 Read tool 直接讀，不用手動 Pipe。
+
+    寫進 file 時每行開頭會自動加上 ISO 8601 timestamp（螢幕輸出維持原樣不加，
+    避免破壞終端機的可讀性）。開檔前若舊檔 >10MB 會先 rotate（保留 .1~.6）。
 
     呼叫時機：在 entry point script (main.py / document_system.py standalone) 啟動
     最開頭呼叫一次。底層用 module-level _LOG_FILE_HANDLE 保留 file 引用避免 GC，
@@ -208,12 +255,21 @@ def _setup_stdout_logging(filename="run.log"):
     """
     global _LOG_FILE_HANDLE
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    _rotate_log_if_needed(log_path)
     _LOG_FILE_HANDLE = open(log_path, "w", encoding="utf-8")
 
     class _Tee:
+        """Tee：螢幕原樣印；檔案逐行前綴 ISO 8601 timestamp。
+
+        _at_line_start 追蹤「下一個寫進 file 的字元是否在行首」。print() 通常會
+        把訊息和 '\\n' 拆成兩次 write，所以要把 data 依 '\\n' 切段、為每段「位於
+        行首且非空」的部分補上 timestamp，才能避免在續行中間誤插時戳。
+        """
+
         def __init__(self, original, file_handle):
             self._original = original
             self._file = file_handle
+            self._at_line_start = True
 
         def write(self, data):
             try:
@@ -221,7 +277,22 @@ def _setup_stdout_logging(filename="run.log"):
             except Exception:
                 pass
             try:
-                self._file.write(data)
+                if not data:
+                    return
+                ts = datetime.now().isoformat(timespec="seconds")
+                segments = data.split("\n")
+                out = []
+                for i, seg in enumerate(segments):
+                    is_last = i == len(segments) - 1
+                    if self._at_line_start and seg:
+                        out.append(f"{ts} {seg}")
+                        self._at_line_start = False
+                    else:
+                        out.append(seg)
+                    if not is_last:
+                        out.append("\n")
+                        self._at_line_start = True
+                self._file.write("".join(out))
                 self._file.flush()
             except Exception:
                 pass
