@@ -313,14 +313,22 @@ def _set_chrome_download_dir(driver, download_dir):
 
 
 def _snapshot_dir(download_dir):
-    """snapshot 下載資料夾既有檔案（含 .crdownload 半成品也算進來,以免 race）。
+    """snapshot 下載資料夾既有檔案,記 {檔名: mtime}。
 
-    回 set[str],元素為檔名（非絕對路徑）。
+    為何不只記檔名:KdApp 在覆寫既有同名 zip 時 (例如使用者跑同一份公文兩次),檔名
+    沒變但 mtime 會更新。只用 set 比對檔名會永遠錯過這次「下載完成」事件。
+    回 dict[str, float],key=檔名,value=mtime。讀不到的單檔忽略 (race condition 安全)。
     """
+    out = {}
     try:
-        return set(os.listdir(download_dir))
+        for name in os.listdir(download_dir):
+            try:
+                out[name] = os.path.getmtime(os.path.join(download_dir, name))
+            except OSError:
+                pass
     except FileNotFoundError:
-        return set()
+        pass
+    return out
 
 
 def _sencha_tap_element(driver, el):
@@ -614,12 +622,15 @@ def _wait_for_new_file(download_dir, snapshot, timeout=60):
     """等到 `download_dir` 內出現新檔且 size 穩定 1s+,回傳新檔絕對路徑。
 
     完成判定:
+    - 新出現的檔(不在 snapshot 內) **或** 既存檔的 mtime 已變(被覆寫,例如使用者
+      跑同一份公文兩次,KdApp 同名覆寫)
     - 副檔名不在 _IN_PROGRESS_EXTS (排除 .crdownload / .tmp / .part / 無副檔名)
     - 且 size 穩定 1s+ (避免捕捉到剛 rename 完但 OS 還在 flush 的瞬間)
 
     特別處理 KdApp:Java 寫 zip 時會先建一個無副檔名的暫存 (例:MWAA1156005008),
     寫完才 rename 為 MWAA1156005008.zip。所以無副檔名階段不算完成。
 
+    snapshot 是 dict[檔名 → mtime] (來自 _snapshot_dir)。
     timeout 內找不到 → 回 None。每 5s 印一次進度供觀察。
     """
     start = time.time()
@@ -627,18 +638,25 @@ def _wait_for_new_file(download_dir, snapshot, timeout=60):
     next_progress = start + 5
     while time.time() < deadline:
         try:
-            now = set(os.listdir(download_dir))
+            now_files = os.listdir(download_dir)
         except FileNotFoundError:
             time.sleep(0.5)
             continue
-        new = now - snapshot
+        # 「新」= 不在 snapshot 內 OR mtime 改變
+        new = []
+        for f in now_files:
+            try:
+                mt = os.path.getmtime(os.path.join(download_dir, f))
+            except OSError:
+                continue
+            if f not in snapshot or snapshot[f] != mt:
+                new.append(f)
         if time.time() >= next_progress:
             elapsed = int(time.time() - start)
             done = [f for f in new if os.path.splitext(f)[1].lower() not in _IN_PROGRESS_EXTS]
             in_progress = [f for f in new if os.path.splitext(f)[1].lower() in _IN_PROGRESS_EXTS]
             print(f"      [{elapsed}s] 新檔狀態:已完成 {done},進行中 {in_progress}")
             next_progress += 5
-        # 過濾出「副檔名 OK」的候選
         finished = [f for f in new
                     if os.path.splitext(f)[1].lower() not in _IN_PROGRESS_EXTS]
         if finished:
@@ -820,6 +838,17 @@ def _download_and_extract(driver):
             print(f"      OK:已刪除 zip 原檔 {new_path}")
         except OSError as e:
             print(f"      [WARN] 刪 zip 失敗:{type(e).__name__}: {e}")
+
+        # 鏈式呼叫 summarize_doc:對解壓出來的公文主檔產出 markdown 總結。
+        # summarize_doc 規格寫在 summarize_doc.md (LLM 用、人類維護),程式 runtime
+        # 讀該檔當 LLM instruction。沒 ANTHROPIC_API_KEY 會跳過 LLM 步驟、只寫保留
+        # 欄位 (發文日期/字號/主旨),整體流程不會因此 fail。
+        try:
+            from summarize_doc import summarize_extracted
+            summarize_extracted(extract_dir)
+        except Exception as e:
+            print(f"      [WARN] summarize_doc 呼叫失敗 (不影響下載流程):"
+                  f"{type(e).__name__}: {e}")
 
     return True, extract_dir
 
