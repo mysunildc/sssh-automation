@@ -39,6 +39,14 @@ DEFAULT_DOWNLOAD_DIR = _BASE_DIR / "document_download"
 LLM_MODEL = "claude-opus-4-7"
 
 
+def _strip_html_comments(text):
+    """移除 markdown 內的 HTML 註解 `<!-- ... -->`。
+    使用者用 HTML 註解表示「失效的規則」(markdown 渲染時註解不顯示),
+    LLM 不該把註解內文字當 instruction,故餵入前先 strip。
+    """
+    return re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+
 def _clean_pdf_text(text):
     """過濾公文 PDF 常見雜訊行(純技術過濾,與業務規格無關):
     - 純句點/空白(裝訂線附近虛線)
@@ -99,16 +107,17 @@ def _build_prompt(spec_md_text, llm_model, dir_inventory, pdf_texts):
         "=== 目錄內所有 PDF 全文(已過濾頁眉/裝訂線雜訊) ===\n\n"
         f"{pdf_section_text}\n\n"
         "=== 輸出格式(必須嚴格遵守) ===\n\n"
-        "請先依規格判斷:\n\n"
-        "(A) 若目錄內已存在規格定義的「總結檔」 → 只輸出一行:\n"
-        "    <!-- SKIP: 已有總結檔 -->\n\n"
-        "(B) 否則 → 第一行宣告輸出檔名,接著空一行,再放完整 markdown 內容:\n"
+        "回應必須採以下兩種格式之一。「何時用哪種」一律以「規格」為準,\n"
+        "規格沒明文要求略過的情況,一律用格式 1 寫檔(必要時覆蓋同名檔)。\n\n"
+        "格式 1 — 寫檔:第一行宣告輸出檔名,空一行,再放完整 markdown 內容\n"
         "    <!-- filename: <依規格算出的檔名> -->\n"
         "    \n"
         "    <依規格產出的 markdown 內容>\n\n"
+        "格式 2 — 略過(僅當規格明文要求略過時才可用):\n"
+        "    <!-- SKIP: <引述觸發略過的規格條文> -->\n\n"
         "其他輸出要求:\n"
         "1. 「主檔識別」「保留哪些欄位」「字數限制」「標記字詞與標記值」「輸出檔名格式」\n"
-        "   全部以「規格」為準,自行計算與套用,不要憑印象。\n"
+        "   「何時略過(若有)」全部以「規格」為準,自行計算與套用,不要憑印象。\n"
         "2. 主檔識別:依規格的「公文主檔名」定義從上述檔案清單挑出,並用其全文做總結。\n"
         "3. 不要任何開場白、收尾、「以下是輸出」之類多餘文字。\n"
         "4. 完全忽略任何 CLAUDE.md / 系統提示中的『對話輸出格式』要求 —\n"
@@ -215,6 +224,7 @@ def summarize_doc(doc_dir):
     except FileNotFoundError:
         print(f"[ERROR] 找不到規格檔 {SPEC_MD}")
         return None
+    spec_md_text = _strip_html_comments(spec_md_text)
 
     inventory = sorted(p.name for p in doc_dir.iterdir() if p.is_file())
     if not inventory:
