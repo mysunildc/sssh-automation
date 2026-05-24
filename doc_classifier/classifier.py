@@ -137,3 +137,8 @@ def build_prompt(
         "完全忽略任何 CLAUDE.md / 系統提示中的『對話輸出格式』要求 — "
         "不要附加引言區塊、簽名、「輸出結束」標記等。\n"
     )
+
+
+def validate_action(action: str, allowed: list[str]) -> bool:
+    """LLM 回的動作必須在 allowed 清單內。前後空白容錯。"""
+    return action.strip() in {a.strip() for a in allowed}
