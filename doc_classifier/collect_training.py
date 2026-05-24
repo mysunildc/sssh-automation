@@ -14,8 +14,6 @@ import shutil
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8")
-
 _BASE_DIR = Path(__file__).parent.resolve()
 _REPO_ROOT = _BASE_DIR.parent
 DEFAULT_DOC_DOWNLOAD = _REPO_ROOT / "document_download"
@@ -52,17 +50,17 @@ def sync(doc_download_root: Path = None, training_root: Path = None) -> dict:
         stats["orphan_kept"] = sum(1 for _ in dst_root.glob("*.md"))
         return stats
 
-    src_names = set()
+    src_all_names = set()  # 凡是被掃到的檔名都算(不管有沒 action)
     for mw_dir in sorted(src_root.iterdir()):
         if not mw_dir.is_dir():
             continue
         for md in mw_dir.glob("*總結*.md"):
+            src_all_names.add(md.name)
             text = md.read_text(encoding="utf-8", errors="replace")
             if not _has_action_field(text):
                 stats["skipped_no_action"] += 1
                 continue
             dst = dst_root / md.name
-            src_names.add(md.name)
             if not dst.exists():
                 shutil.copy2(md, dst)
                 stats["added"] += 1
@@ -70,15 +68,16 @@ def sync(doc_download_root: Path = None, training_root: Path = None) -> dict:
                 shutil.copy2(md, dst)
                 stats["updated"] += 1
 
-    # 算 orphan
+    # 算 orphan:training_data 內,但 source 完全沒掃到的(source 被刪了)
     for existing in dst_root.glob("*.md"):
-        if existing.name not in src_names:
+        if existing.name not in src_all_names:
             stats["orphan_kept"] += 1
 
     return stats
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
     stats = sync()
     print(
         f"[collect_training] added={stats['added']} updated={stats['updated']} "

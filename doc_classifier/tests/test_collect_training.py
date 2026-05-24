@@ -69,3 +69,22 @@ def test_sync_action_must_be_at_line_start(tmp_path):
 
     stats = sync(doc_download_root=root, training_root=training)
     assert stats["added"] == 0
+
+
+def test_sync_action_removed_not_counted_as_orphan(fake_doc_download, fake_training_dir):
+    """source 仍存在但使用者拿掉 # action: 後重跑 → 不該算成 orphan_kept。"""
+    from doc_classifier.collect_training import sync
+
+    # 第一次:複製進去
+    sync(doc_download_root=fake_doc_download, training_root=fake_training_dir)
+    assert (fake_training_dir / "1140001_001A總結.claude-opus-4-7.md").exists()
+
+    # 把 source 的 # action 拿掉 (source 還在,只是不再有 action 標記)
+    src = fake_doc_download / "MW001" / "1140001_001A總結.claude-opus-4-7.md"
+    src.write_text("發文日期:2026-05-20\n主旨:辦理校園資安宣導\n", encoding="utf-8")
+
+    stats = sync(doc_download_root=fake_doc_download, training_root=fake_training_dir)
+
+    # source 還在,只是失去 action 標記 → 算 skipped_no_action,不算 orphan
+    assert stats["skipped_no_action"] == 2  # MW001 (剛拿掉的) + MW003 (本來就沒 action)
+    assert stats["orphan_kept"] == 0  # 沒有真正的孤兒 (source 都還在)
