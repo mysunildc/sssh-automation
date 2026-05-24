@@ -4,6 +4,7 @@
 Python 只負責 I/O。
 """
 import re
+import sys
 import yaml
 from pathlib import Path
 
@@ -272,3 +273,82 @@ def classify_dir(
         f"examples={','.join(parsed['examples'])}",
     )
     return {"status": "ok", **parsed}
+
+
+def run_one(
+    mw_dir: Path,
+    actions_yaml: Path = None,
+    spec_md: Path = None,
+    training_root: Path = None,
+    runs_log: Path = None,
+    force: bool = False,
+    do_sync: bool = True,
+) -> dict:
+    """對單一 MW 目錄跑一輪:先 sync 訓練資料、再 classify_dir。
+
+    注意:import 採 module-level form (`from doc_classifier import collect_training`),
+    這樣測試的 `monkeypatch.setattr(collect_training, "sync", ...)` 才攔得到。
+    """
+    if do_sync:
+        from doc_classifier import collect_training
+        collect_training.sync(training_root=training_root)
+    return classify_dir(
+        mw_dir=mw_dir,
+        actions_yaml=actions_yaml,
+        spec_md=spec_md,
+        training_root=training_root,
+        runs_log=runs_log,
+        force=force,
+    )
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser(
+        description="doc_classifier - classify MW documents.",
+    )
+    p.add_argument(
+        "mw_dir",
+        nargs="?",
+        help="MW directory path; omit to scan ../document_download/MW*/",
+    )
+    p.add_argument("--force", action="store_true",
+                   help="Re-classify even if # suggested_action already present.")
+    p.add_argument("--no-sync", action="store_true",
+                   help="Skip collect_training.sync, only classify.")
+    args = p.parse_args()
+
+    do_sync = not args.no_sync
+
+    if args.mw_dir:
+        result = run_one(
+            mw_dir=Path(args.mw_dir),
+            force=args.force,
+            do_sync=do_sync,
+        )
+        print(f"[classifier] {Path(args.mw_dir).name} → {result['status']}")
+        return
+
+    doc_download = _BASE_DIR.parent / "document_download"
+    if not doc_download.is_dir():
+        print(f"[ERROR] {doc_download} 不存在")
+        sys.exit(1)
+    mw_dirs = sorted(d for d in doc_download.iterdir()
+                     if d.is_dir() and d.name.startswith("MW"))
+    if not mw_dirs:
+        print(f"[INFO] {doc_download} 內沒有 MW* 子目錄")
+        return
+
+    if do_sync:
+        from doc_classifier import collect_training
+        stats = collect_training.sync()
+        print(f"[sync] added={stats['added']} updated={stats['updated']} "
+              f"orphan_kept={stats['orphan_kept']}")
+
+    for d in mw_dirs:
+        result = classify_dir(mw_dir=d, force=args.force)
+        print(f"[classifier] {d.name} → {result['status']}")
+
+
+if __name__ == "__main__":
+    main()
