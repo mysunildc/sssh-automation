@@ -700,8 +700,9 @@ def _click_signoff_button(driver, timeout=10):
     return False
 
 
-def _click_first_document_in_pending(driver, timeout=5):
-    """點承辦中清單最上方的公文（公文文號 column 第一筆連結）。
+def _click_first_document_in_pending(driver, timeout=5, label="承辦中"):
+    """點清單最上方的公文（公文文號 column 第一筆連結）。承辦中、待結案等
+    共用同一張含「公文文號」欄的表格，本函式 generic 處理。label 只影響 print 訊息。
 
     edoc 承辦中頁顯示一個表格，欄位序號/簽核/收文/狀別/速別/公文文號/送件時間/...
     每列「公文文號」欄是藍色超連結文字（例如 MWAA1156004874），點下去開公文內容。
@@ -719,7 +720,7 @@ def _click_first_document_in_pending(driver, timeout=5):
        內所有可見 a 的 text/href、含公文號 pattern 的葉子元素 tag+outerHTML、
        body innerText 前 1500 字 — 看 MWAA 實際是什麼 tag、結構。
 
-    回 True 表示已點到，False 表示沒找到（呼叫端應改手動處理）。
+    回傳公文文號字串（已點到）；None 表示沒找到（呼叫端應改手動處理）。
     """
     deadline = time.time() + timeout
     target = None
@@ -820,8 +821,8 @@ def _click_first_document_in_pending(driver, timeout=5):
             else:
                 driver.execute_script(
                     "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", target)
-                print(f"      OK：點到承辦中最上方公文「{txt}」（{strategy}）")
-                return True
+                print(f"      OK：點到{label}最上方公文「{txt}」（{strategy}）")
+                return txt
         except Exception as e:
             print(f"      x  click 公文號失敗：{type(e).__name__}: {e}")
             target = None
@@ -898,7 +899,7 @@ def _click_first_document_in_pending(driver, timeout=5):
         print(f"      body innerText (前 1500 字)：{body_preview!r}")
     except Exception as e:
         print(f"      diagnostic 失敗：{type(e).__name__}: {e}")
-    return False
+    return None
 
 
 def _click_urgent_message(driver, timeout=10):

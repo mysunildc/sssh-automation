@@ -44,6 +44,7 @@ def process_document_closure(driver):
         _get_sidebar_paren_count,
         _click_sidebar_item,
         _switch_to_frame_with_xpath,
+        _click_first_document_in_pending,
     )
 
     print("[document_closure] 開始結案存查流程...")
@@ -88,11 +89,35 @@ def process_document_closure(driver):
         print("[document_closure] 切不到內容 frame，請手動處理。")
         return False
 
-    # ── TODO: 逐筆執行結案存查 ──────────────────────────────────────────
-    # 後續待實作：逐筆讀取待結案清單，對每一筆執行「結案存查」點擊動作。
-    # 參考 pending_doc() 的 _click_first_document_in_pending 模式。
-    print(f"[document_closure] 找到待結案清單（{count} 筆）。")
-    print("[document_closure] TODO: 逐筆執行結案存查點擊動作（尚未實作）")
+    # ── 點待結案清單第一筆公文、記下文號 ───────────────────────────────
+    # 待結案與承辦中共用同一張含「公文文號」欄的表格，重用 document_system 的
+    # _click_first_document_in_pending（回傳公文文號字串）。記下文號供後續
+    # 選擇「存查檔號」使用。
+    print(f"[document_closure] 待結案清單共 {count} 筆，點選最上方第一筆...")
+    doc_no = _click_first_document_in_pending(driver, label="待結案")
+    if not doc_no:
+        print("[document_closure] 點待結案公文失敗，請手動處理。")
+        driver.switch_to.default_content()
+        return False
+
+    print("=" * 50)
+    print(f"[document_closure] ★ 已選定待結案公文文號：{doc_no}")
+    print("[document_closure] ★（此文號供後續選擇存查檔號使用）")
+    print("=" * 50)
+
+    # 點公文後系統可能就地切 frame、開新分頁或彈 modal，短 sleep 等回應
+    time.sleep(1)
+    try:
+        print(f"[document_closure] 點開後 URL：{driver.current_url}")
+        print(f"[document_closure] 點開後標題：{driver.title}")
+        handles = driver.window_handles
+        if len(handles) > 1:
+            print(f"[document_closure] 偵測到 {len(handles)} 個 window — 公文內容可能開在新分頁")
+    except Exception as e:
+        print(f"[document_closure] 讀狀態失敗：{type(e).__name__}: {e}")
+
+    # ── TODO: 依 doc_no 選擇存查檔號、完成結案存查 ──────────────────────
+    print("[document_closure] TODO: 依文號選擇存查檔號、完成結案存查（尚未實作）")
 
     driver.switch_to.default_content()
     print("[document_closure] 結案存查流程結束。")
