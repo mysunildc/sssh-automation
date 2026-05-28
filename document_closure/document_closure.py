@@ -82,6 +82,34 @@ def _copy_summary_from_pending(closure_dir):
     return count
 
 
+def _delete_pending_archive(closure_dir):
+    """刪除 document_download/<同公文文號>/ 目錄。
+
+    呼叫時機:結案存查已歸檔到 closure_dir + *總結*.md 已成功複製過去。
+    此時承辦中目錄內容已完全在結案目錄,刪除節省空間、避免重複。
+
+    安全前提:呼叫端應先確認 _copy_summary_from_pending 回傳 > 0,代表
+    承辦中目錄存在且 *總結*.md 已成功複製;否則不該呼叫本函式(會誤刪
+    尚未歸檔的內容)。
+
+    回 True 表示已刪除/不存在無需刪除;False 表示刪除失敗(rmtree 例外)。
+    """
+    from pending_doc_handler import DOWNLOAD_DIR as _PENDING_DIR
+
+    doc_no = os.path.basename(os.path.normpath(closure_dir))
+    src_dir = os.path.join(_PENDING_DIR, doc_no)
+    if not os.path.isdir(src_dir):
+        print(f"      [INFO] 承辦中目錄 {src_dir} 不存在,無需刪除")
+        return True
+    try:
+        shutil.rmtree(src_dir)
+        print(f"      OK:已刪除承辦中目錄 {src_dir}")
+        return True
+    except OSError as e:
+        print(f"      x  刪除承辦中目錄失敗:{type(e).__name__}: {e}")
+        return False
+
+
 def _switch_to_doc_viewer_window(driver):
     """點待結案公文後，新分頁(公文閱覽器)會開啟，把 driver focus 切到非主 window。
 
@@ -372,7 +400,15 @@ def process_document_closure(driver):
         print(f"[document_closure] ✓ 結案存查下載完成，解壓到 {extract_dir}")
         # 把承辦中流程已產生的 *總結*.md 一起歸檔到結案目錄
         print("[document_closure] 從承辦中目錄複製 *總結*.md 到結案目錄...")
-        _copy_summary_from_pending(extract_dir)
+        copied = _copy_summary_from_pending(extract_dir)
+        # 已歸檔完成(總結也已複製)→ 刪除承辦中重複目錄。
+        # 條件:copied > 0 才刪 — 沒總結可複製代表承辦中流程沒走完(或無 API key
+        # 沒產 LLM 摘要),保留承辦中目錄供事後檢查比較安全。
+        if copied > 0:
+            print("[document_closure] 總結已歸檔,刪除承辦中重複目錄...")
+            _delete_pending_archive(extract_dir)
+        else:
+            print("[document_closure] 未複製到總結,保留承辦中目錄供檢查(不刪除)。")
     else:
         print("[document_closure] ✓ 結案存查下載完成 (非 zip，原檔保留)")
 
