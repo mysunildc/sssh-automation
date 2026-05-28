@@ -83,37 +83,80 @@ def _switch_to_doc_viewer_window(driver):
     return True
 
 
+# 在當前 frame 內搜尋 keyword 的 JS:innerText 只看純文字節點,看不到 <input>
+# 與 <textarea> 的 value(實測「如擬」是核決區的 input value,innerText 抓不到)。
+# 補:also check element.value、value attr、title/placeholder/aria-label 屬性。
+# 命中時連帶回傳命中來源(供 diagnostic),沒命中回 false。
+_FIND_KEYWORD_JS = """
+var kw = arguments[0];
+if (document.body && document.body.innerText.indexOf(kw) !== -1) {
+    return 'innerText';
+}
+// <input> / <textarea> 的 value(form field 內顯示的文字)
+var fields = document.querySelectorAll('input, textarea, select');
+for (var i = 0; i < fields.length; i++) {
+    var v = fields[i].value || '';
+    if (v.indexOf(kw) !== -1) return 'input.value';
+}
+// 屬性兜底:title / placeholder / aria-label / value attribute(有些 UI
+// 把可見文字塞屬性)
+var attrs = ['title', 'placeholder', 'aria-label', 'value', 'data-value'];
+var all = document.querySelectorAll('*');
+for (var i = 0; i < all.length; i++) {
+    var el = all[i];
+    for (var j = 0; j < attrs.length; j++) {
+        var a = el.getAttribute && el.getAttribute(attrs[j]);
+        if (a && a.indexOf(kw) !== -1) return 'attr:' + attrs[j];
+    }
+}
+return false;
+"""
+
+
+def _find_keyword_in_current_frame(driver, keyword):
+    """在當前 frame 找 keyword(回傳命中來源字串或 None)。"""
+    try:
+        result = driver.execute_script(_FIND_KEYWORD_JS, keyword)
+        return result if result else None
+    except Exception:
+        return None
+
+
 def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
     """檢查公文閱覽器頁面是否含結案存查判定關鍵字（預設「如擬」）。
 
-    公文閱覽器是 iframe-based 排版，右側「承辦/會辦/核決」意見區可能在內 frame。
-    策略：先檢查 top-level body.innerText；找不到則遍歷所有 iframe 各檢查一次。
-    每輪 0.5s 一次直到 timeout，給頁面非同步載入留時間。
+    公文閱覽器是 iframe-based 排版，右側「承辦/會辦/核決」意見區的「如擬」實測
+    是 <input> 的 value(不是純文字節點),innerText 抓不到。本函式用 _FIND_KEYWORD_JS
+    同時檢查 innerText / form field value / 常見屬性。
 
-    回 True 表示頁面任一處可見 keyword，False 表示 timeout 內都找不到。
+    策略：每輪先檢查 top-level，再遍歷所有 iframe；每輪 0.5s 直到 timeout。
+    命中時印命中來源(innerText / input.value / attr:xxx) + 哪個 frame，方便將來
+    判斷失敗時除錯。
+
+    回 True 表示頁面任一處有 keyword、False 表示 timeout 內都找不到。
     """
     deadline = time.time() + timeout
-    js = ("return document.body ? document.body.innerText.indexOf(arguments[0]) "
-          "!== -1 : false;")
     while time.time() < deadline:
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
-        try:
-            if driver.execute_script(js, keyword):
-                return True
-        except Exception:
-            pass
+        hit = _find_keyword_in_current_frame(driver, keyword)
+        if hit:
+            print(f"      OK：top-level frame 找到「{keyword}」(來源: {hit})")
+            return True
         try:
             iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
         except Exception:
             iframes = []
         for ifr in iframes:
             try:
+                name = ifr.get_attribute("name") or ifr.get_attribute("id") or "<unnamed>"
                 driver.switch_to.default_content()
                 driver.switch_to.frame(ifr)
-                if driver.execute_script(js, keyword):
+                hit = _find_keyword_in_current_frame(driver, keyword)
+                if hit:
+                    print(f"      OK：frame '{name}' 找到「{keyword}」(來源: {hit})")
                     driver.switch_to.default_content()
                     return True
             except Exception:
@@ -124,6 +167,60 @@ def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
             pass
         time.sleep(0.5)
     return False
+
+
+def _dump_frames_diagnostic(driver, keyword=_APPROVAL_KEYWORD):
+    """『如擬』找不到時，dump 每個 frame 的關鍵狀態：URL、body 前 200 字、
+    input/textarea value 前幾個，方便看是哪個 frame 沒進去、或關鍵字實際長啥樣。
+    """
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    def _dump_here(label):
+        try:
+            info = driver.execute_script("""
+                var inputs = document.querySelectorAll('input, textarea, select');
+                var values = [];
+                for (var i = 0; i < inputs.length && values.length < 8; i++) {
+                    var v = (inputs[i].value || '').trim();
+                    if (v) values.push(v.substring(0, 60));
+                }
+                return {
+                    url: document.URL || '',
+                    title: document.title || '',
+                    body: document.body
+                        ? document.body.innerText.substring(0, 200) : '',
+                    inputs: values,
+                };
+            """) or {}
+            print(f"      [{label}] URL = {(info.get('url') or '')[:120]}")
+            print(f"             title = {info.get('title')!r}")
+            print(f"             body 前 200 字 = {(info.get('body') or '')!r}")
+            for j, v in enumerate(info.get('inputs') or []):
+                print(f"             input[{j+1}] value = {v!r}")
+        except Exception as e:
+            print(f"      [{label}] dump 失敗：{type(e).__name__}: {e}")
+
+    print(f"[document_closure] [diagnostic] 找不到「{keyword}」,dump 各 frame:")
+    _dump_here("top")
+    try:
+        iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+    except Exception:
+        iframes = []
+    for i, ifr in enumerate(iframes):
+        try:
+            name = ifr.get_attribute("name") or ifr.get_attribute("id") or f"#{i+1}"
+            driver.switch_to.default_content()
+            driver.switch_to.frame(ifr)
+            _dump_here(name)
+        except Exception as e:
+            print(f"      [#{i+1}] 進 frame 失敗：{type(e).__name__}: {e}")
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
 
 
 def process_document_closure(driver):
@@ -214,7 +311,8 @@ def process_document_closure(driver):
     print(f"[document_closure] 判定核決區是否有「{_APPROVAL_KEYWORD}」...")
     if not _has_approval_text(driver, timeout=10):
         print(f"[document_closure] 核決區未見「{_APPROVAL_KEYWORD}」，"
-              "保守不下載(可能還在簽核或意見有異)，結束。")
+              "保守不下載(可能還在簽核或意見有異)。dump frame 內容供除錯:")
+        _dump_frames_diagnostic(driver)
         return True
 
     print(f"[document_closure] ✓ 核決區有「{_APPROVAL_KEYWORD}」，"
