@@ -10,7 +10,9 @@ document_closure.py
    session 過期時會提示跑 main.py 重新登入。
 """
 
+import glob
 import os
+import shutil
 import sys
 import time
 
@@ -39,6 +41,45 @@ CLOSURE_DOWNLOAD_DIR = os.path.normpath(os.path.join(_PROJECT_ROOT, "document_do
 # 結案存查判定關鍵字 — 公文閱覽器右側「核決」意見區出現此字串,代表主管已核可,
 # 才執行下載+結案存查動作。其他狀態(如還在簽核、意見有異)保守不動作。
 _APPROVAL_KEYWORD = "如擬"
+
+
+def _copy_summary_from_pending(closure_dir):
+    """從 document_download/<同公文文號>/ 找 *總結*.md 複製到 closure_dir。
+
+    結案存查時通常公文在承辦中流程已下載並摘要過(summarize_doc 產出
+    「公文主檔名總結.<LLM 模型名>.md」)。把該摘要也歸檔到結案存查目錄,
+    讓最終歸檔目錄一目了然(原始檔 + LLM 摘要),不必兩個資料夾翻來翻去。
+
+    流程:
+    1. closure_dir 的 basename = 公文文號(例 MWAA1156005236)
+    2. pending_doc_handler.DOWNLOAD_DIR/<公文文號>/ 找 *總結*.md
+    3. shutil.copy2 到 closure_dir(保留 mtime)
+
+    回成功複製的檔數(>=0)。源目錄不存在或無命中檔案都回 0(印警告)。
+    """
+    from pending_doc_handler import DOWNLOAD_DIR as _PENDING_DIR
+
+    doc_no = os.path.basename(os.path.normpath(closure_dir))
+    src_dir = os.path.join(_PENDING_DIR, doc_no)
+    if not os.path.isdir(src_dir):
+        print(f"      [WARN] 找不到承辦中目錄 {src_dir},無 *總結*.md 可複製")
+        return 0
+
+    summary_files = glob.glob(os.path.join(src_dir, "*總結*.md"))
+    if not summary_files:
+        print(f"      [WARN] {src_dir} 內無 *總結*.md")
+        return 0
+
+    count = 0
+    for src_path in summary_files:
+        dst_path = os.path.join(closure_dir, os.path.basename(src_path))
+        try:
+            shutil.copy2(src_path, dst_path)
+            print(f"      OK:複製 {os.path.basename(src_path)} → {closure_dir}")
+            count += 1
+        except OSError as e:
+            print(f"      x  複製 {src_path} 失敗:{type(e).__name__}: {e}")
+    return count
 
 
 def _switch_to_doc_viewer_window(driver):
@@ -329,6 +370,9 @@ def process_document_closure(driver):
         return False
     if extract_dir:
         print(f"[document_closure] ✓ 結案存查下載完成，解壓到 {extract_dir}")
+        # 把承辦中流程已產生的 *總結*.md 一起歸檔到結案目錄
+        print("[document_closure] 從承辦中目錄複製 *總結*.md 到結案目錄...")
+        _copy_summary_from_pending(extract_dir)
     else:
         print("[document_closure] ✓ 結案存查下載完成 (非 zip，原檔保留)")
 
