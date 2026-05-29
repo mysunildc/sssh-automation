@@ -138,11 +138,22 @@ def _build_prompt(spec_md_text, dir_inventory, pdf_texts):
         "=== 輸出格式(必須嚴格遵守) ===\n\n"
         "回應必須採以下兩種格式之一。「何時用哪種」一律以「規格」為準,\n"
         "規格沒明文要求略過的情況,一律用格式 1 寫檔(必要時覆蓋同名檔)。\n\n"
-        "格式 1 — 寫檔:第一行宣告輸出檔名,空一行,再放完整 markdown 內容\n"
-        "    <!-- filename: <依規格算出的檔名> -->\n"
+        "格式 1 — 寫檔(可一次輸出多個檔):\n"
+        "    每個要產出的檔以 `<!-- filename: <檔名> -->` 起頭、空一行,接著放完整內容。\n"
+        "    多個檔依序排列、用同樣標記隔開,例:\n"
+        "        <!-- filename: <檔名1> -->\n"
+        "        \n"
+        "        <檔1 的完整內容>\n"
+        "        \n"
+        "        <!-- filename: <檔名2> -->\n"
+        "        \n"
+        "        <檔2 的完整內容>\n"
         "    \n"
-        "    <依規格產出的 markdown 內容>\n\n"
-        "格式 2 — 略過(僅當規格明文要求略過時才可用):\n"
+        "    ※ 規格若要求多個輸出檔(例:內容.txt + 總結.md),本回應必須包含對應的\n"
+        "       多個 filename 區段。若清單顯示其中某輸出檔已存在、規格要求略過該項\n"
+        "       工作 — 不要產出該檔的 filename 區段(只輸出仍需要產出的那個檔即可)。\n"
+        "       規格要求略過的工作對應的所有檔都已存在 → 改用格式 2 SKIP。\n\n"
+        "格式 2 — 略過(僅當規格明文要求略過、且全部該輸出的檔都已存在時才可用):\n"
         "    <!-- SKIP: <引述觸發略過的規格條文> -->\n\n"
         "其他輸出要求:\n"
         "1. 「主檔識別」「保留哪些欄位」「字數限制」「標記字詞與標記值」「輸出檔名格式」\n"
@@ -310,19 +321,32 @@ def _call_backends(prompt):
 
 def _parse_response(response):
     """解析 LLM 回應。回:
-       ('SKIP', None)        → LLM 判定略過(目錄已有總結檔)
-       (filename, content)   → 寫檔
-       None                  → 格式錯誤(由呼叫端決定怎麼處理)
+       ('SKIP', None)              → LLM 判定全部略過(兩個輸出檔都已存在)
+       [(filename, content), ...]  → 寫一或多個檔(spec 要求兩個檔時這裡會有兩個 tuple)
+       None                        → 格式錯誤(由呼叫端決定怎麼處理)
+
+    多檔輸出格式:LLM 回應可依序排列多個 `<!-- filename: ... -->` 標記,每個標記
+    之後到下一個標記(或文末)的內容即該檔的完整內容。所有 trailing 空白會 strip。
     """
     response = response.strip()
     if re.match(r'<!--\s*SKIP\b', response):
-        return ("SKIP", None)
-    m = re.match(r'<!--\s*filename:\s*(.+?)\s*-->\s*\n+(.*)', response, re.DOTALL)
-    if not m:
+        return ('SKIP', None)
+
+    pat = re.compile(r'<!--\s*filename:\s*(.+?)\s*-->\s*\n+', re.IGNORECASE)
+    matches = list(pat.finditer(response))
+    if not matches:
         return None
-    filename = m.group(1).strip()
-    content = m.group(2).lstrip("\n")
-    return (filename, content)
+
+    files = []
+    for i, m in enumerate(matches):
+        fname = m.group(1).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(response)
+        content = response[start:end].strip()
+        if not content:
+            continue  # 空 content 跳過(LLM 偶有空段)
+        files.append((fname, content))
+    return files if files else None
 
 
 def summarize_doc(doc_dir):
@@ -333,13 +357,20 @@ def summarize_doc(doc_dir):
         return None
     print(f"[summarize_doc] 處理 {doc_dir.name}")
 
-    # 預檢:目錄內已有總結檔(*總結.*.md,例 1234_5678A總結.gemini-3-flash-preview.md)
-    # 就直接跳過,連 PDF 抽文字 / LLM round-trip 都省。spec 端 SKIP 規則仍是 source of
-    # truth,此處只是早一步攔下來的捷徑。
-    existing = sorted(doc_dir.glob('*總結.*.md'))
-    if existing:
-        print(f"      已存在總結檔 {existing[0].name},略過(省 LLM)")
+    # 預檢:規格要求兩個輸出檔(內容.txt + 總結.md),兩個都存在才完全跳過、省 LLM。
+    # 一個有一個沒有 → 仍 run,讓 LLM 依規格只補不存在的那個(每個輸出檔各自有
+    # 「已存在則略過」的子規則,LLM 自行判斷)。spec 端 SKIP 是 source of truth,
+    # 此處的預檢只是「兩個都有」這個捷徑可以早一步攔下來、省 LLM。
+    existing_summary = sorted(doc_dir.glob('*總結.*.md'))
+    existing_content = sorted(doc_dir.glob('*內容.txt'))
+    if existing_summary and existing_content:
+        print(f"      已存在 {existing_content[0].name} + {existing_summary[0].name},"
+              "完全略過(省 LLM)")
         return None
+    if existing_content and not existing_summary:
+        print(f"      已有 {existing_content[0].name},仍需產出 *總結.md")
+    elif existing_summary and not existing_content:
+        print(f"      已有 {existing_summary[0].name},仍需產出 *內容.txt")
 
     try:
         spec_md_text = SPEC_MD.read_text(encoding='utf-8')
@@ -391,15 +422,19 @@ def summarize_doc(doc_dir):
     if parsed is None:
         print(f"[ERROR] 連續 {_SUMMARIZE_MAX_ATTEMPTS} 次 LLM 回應都不符格式,放棄此目錄")
         return None
-    filename, content = parsed
-    if filename == "SKIP":
+    if isinstance(parsed, tuple) and parsed[0] == 'SKIP':
         print(f"      LLM 依規格判定略過({doc_dir.name})")
         return None
 
-    out_path = doc_dir / filename
-    out_path.write_text(content, encoding='utf-8')
-    print(f"      OK:輸出 → {out_path.name}")
-    return out_path
+    # parsed 是 [(filename, content), ...] — 規格要求兩個輸出檔時這裡有兩個 tuple
+    out_paths = []
+    for filename, content in parsed:
+        out_path = doc_dir / filename
+        out_path.write_text(content, encoding='utf-8')
+        print(f"      OK:輸出 → {out_path.name}")
+        out_paths.append(out_path)
+    # 為了相容呼叫端對「成功就回非 None」的判斷,回 list(沿用 path[0] 作為主輸出)。
+    return out_paths[0] if out_paths else None
 
 
 def summarize_extracted(extract_dir):
