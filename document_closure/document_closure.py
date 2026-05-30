@@ -832,17 +832,33 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     return True
 
 
+# 找 doc_no 在可見 <tr>(待結案清單的列)的 JS — 比通用 _FIND_KEYWORD_JS 更精確:
+# 通用版會掃 innerText + 所有 input.value + 所有 attribute,即使 doc_no 已從清單
+# 消失,仍可能誤命中(系統殘留的 hidden form field、attribute、system message 等),
+# 導致 verify 誤判失敗。
+# 本 JS 只看「可見 <tr>」是否含 doc_no — 與使用者視覺感知一致(看不到 row 就算成功)。
+_FIND_DOC_IN_VISIBLE_ROW_JS = r"""
+var docNo = arguments[0];
+var trs = document.querySelectorAll('tr');
+for (var i = 0; i < trs.length; i++) {
+    var tr = trs[i];
+    if (tr.offsetParent === null) continue;  // 不可見跳過
+    var t = (tr.textContent || '').trim();
+    if (t.indexOf(docNo) !== -1) return true;
+}
+return false;
+"""
+
+
 def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
-    """確認 doc_no 已從「待結案」清單消失 → 存查成功。
+    """確認 doc_no 已從「待結案」清單可見列消失 → 存查成功。
 
-    pinCode 填完 + popup 關閉後,系統會在主視窗刷新待結案清單(成功歸檔的公文
-    應從清單消失,所以 doc_no 字串不該出現在頁面任一處可見內容)。
+    pinCode + popup 關閉後系統會刷新清單;成功歸檔的公文應從清單消失。
+    只看「可見 <tr>」是否含 doc_no — 與視覺感知一致;不掃 hidden form fields
+    / attributes / 系統訊息(會誤命中)。
 
-    流程:每 1s 用 _find_keyword_in_current_frame(會掃 innerText + input.value)
-    在 top + iframe 搜尋 doc_no;找不到即視為成功。timeout 內始終找到 → 印 WARN
-    回 False(可能 系統處理中 / 未成功 — 由呼叫端決定是否續寫標記檔)。
-
-    成功 → True;timeout 仍見 doc_no → False。
+    流程:每 1s 在 top + iframe 跑 _FIND_DOC_IN_VISIBLE_ROW_JS;找不到 → 成功。
+    timeout 內始終找到 → 印 WARN 回 False。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -850,10 +866,10 @@ def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
             driver.switch_to.default_content()
         except Exception:
             pass
-        # top-level
         found = False
+        # top-level
         try:
-            if _find_keyword_in_current_frame(driver, doc_no):
+            if driver.execute_script(_FIND_DOC_IN_VISIBLE_ROW_JS, doc_no):
                 found = True
         except Exception:
             pass
@@ -867,7 +883,7 @@ def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
                 try:
                     driver.switch_to.default_content()
                     driver.switch_to.frame(ifr)
-                    if _find_keyword_in_current_frame(driver, doc_no):
+                    if driver.execute_script(_FIND_DOC_IN_VISIBLE_ROW_JS, doc_no):
                         found = True
                         break
                 except Exception:
@@ -877,10 +893,10 @@ def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
             except Exception:
                 pass
         if not found:
-            print(f"      OK:doc_no「{doc_no}」已從清單消失,存查成功")
+            print(f"      OK:doc_no「{doc_no}」已從待結案清單可見列消失,存查成功")
             return True
         time.sleep(1)
-    print(f"      [WARN] {timeout}s 內 doc_no「{doc_no}」仍在頁面,可能存查未成功")
+    print(f"      [WARN] {timeout}s 內 doc_no「{doc_no}」仍在某個可見列,可能存查未成功")
     return False
 
 
