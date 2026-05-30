@@ -1282,8 +1282,43 @@ def _dump_frames_diagnostic(driver, keyword=_APPROVAL_KEYWORD):
         pass
 
 
-def process_document_closure(driver):
-    """結案存查主流程。driver 必須已導航到 edoc 公文首頁。
+def process_document_closure(driver, max_iterations=30):
+    """迴圈處理「待結案」清單,直到清空或失敗。
+
+    每輪先讀 sidebar「待結案(N)」:
+    - N = 0:全部處理完畢,return True(畫面停在待結案清單)
+    - N < 0:無法判讀(可能 driver 在錯的頁面),return False
+    - N > 0:呼叫 _process_one_pending_closure_doc 處理第一筆;成功則繼續下一輪,
+            失敗則 return False(剩餘交給使用者手動)
+
+    max_iterations(預設 30)是 runaway 保險:若 count 因某種理由沒下降,
+    達到上限就強制停止,避免無限迴圈。
+
+    給 standalone __main__、main.py FEATURES[2]、document_system.pending_closeout_doc
+    delegate 共用同一入口。
+    """
+    from document_system import _get_sidebar_paren_count
+
+    for i in range(1, max_iterations + 1):
+        count = _get_sidebar_paren_count(driver, "待結案")
+        if count == 0:
+            print(f"\n[document_closure] ✓ 待結案 = 0,全部處理完畢(共跑了 {i - 1} 輪)")
+            return True
+        if count < 0:
+            print("\n[document_closure] [ERROR] 無法判讀待結案數,中止迴圈")
+            return False
+        print(f"\n[document_closure] ═══ 第 {i} 輪(待結案剩 {count} 筆)═══")
+        ok = _process_one_pending_closure_doc(driver)
+        if not ok:
+            print(f"\n[document_closure] 第 {i} 輪失敗,中止迴圈(剩 {count} 筆未處理,"
+                  "請手動處理或重跑)")
+            return False
+    print(f"\n[document_closure] [WARN] 達到 max_iterations={max_iterations},強制停止")
+    return False
+
+
+def _process_one_pending_closure_doc(driver):
+    """處理「待結案」清單第一筆公文(單筆)。driver 必須已導航到 edoc 公文首頁。
 
     流程：
         1. 確認 current_url 在 edoc.gov.taipei
