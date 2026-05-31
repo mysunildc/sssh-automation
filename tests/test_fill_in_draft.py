@@ -1,6 +1,24 @@
 import textwrap
 
+import yaml
+
 import fill_in_draft
+
+
+_SAMPLE_CONFIG = {
+    "default": {"辦理文字": "擬:", "動作": "none"},
+    "rules": [
+        {"標記": "資安", "優先序": 20, "辦理文字": "陳會文字", "動作": "陳會"},
+        {"標記": "不參加", "優先序": 10, "辦理文字": "不參加文字", "動作": "none"},
+        {"標記": "汰換", "優先序": 30, "辦理文字": "汰換文字", "動作": "備選動作"},
+    ],
+}
+
+
+def _write_config(tmp_path):
+    p = tmp_path / "fill_in_draft.yaml"
+    p.write_text(yaml.safe_dump(_SAMPLE_CONFIG, allow_unicode=True), encoding="utf-8")
+    return p
 
 
 def _write_summary(extract_dir, filename, content):
@@ -36,3 +54,30 @@ def test_read_marks_single_mark(tmp_path):
         ## 汰換
         """)
     assert fill_in_draft._read_marks(tmp_path) == ["汰換"]
+
+
+def test_load_rules_returns_rules_and_default(tmp_path):
+    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert default == {"辦理文字": "擬:", "動作": "none"}
+    assert len(rules) == 3
+
+
+def test_lookup_first_match_by_priority_wins(tmp_path):
+    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+    text, action = fill_in_draft._lookup(["資安", "不參加"], rules, default)
+    assert (text, action) == ("不參加文字", "none")
+
+
+def test_lookup_single_mark_hits_its_rule(tmp_path):
+    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup(["資安"], rules, default) == ("陳會文字", "陳會")
+
+
+def test_lookup_no_match_falls_back_to_default(tmp_path):
+    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup(["不存在的標記"], rules, default) == ("擬:", "none")
+
+
+def test_lookup_empty_marks_falls_back_to_default(tmp_path):
+    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup([], rules, default) == ("擬:", "none")
