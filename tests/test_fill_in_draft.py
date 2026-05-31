@@ -6,14 +6,14 @@ import fill_in_draft
 
 
 _SAMPLE_CONFIG = {
-    "template": "擬:\n<辦理文字>陳閱後文存查。",
-    "default": {"辦理文字": "", "動作": "none"},
+    "template": "擬:\n<承辦文字>陳閱後文存查。",
+    "default": {"承辦文字": "", "動作": "none"},
     # rules 越上方越優先;測試裡刻意把「不參加」放在「資安」之前,
     # 跟現實 yaml 順序一致。
     "rules": [
-        {"標記": "不參加", "辦理文字": "不參加，", "動作": "none"},
-        {"標記": "資安", "辦理文字": "陳會片段，", "動作": "陳會"},
-        {"標記": "汰換", "辦理文字": "汰換片段，", "動作": "備選動作"},
+        {"標記": "不參加", "承辦文字": "不參加，", "動作": "none"},
+        {"標記": "資安", "承辦文字": "陳會片段，", "動作": "陳會"},
+        {"標記": "汰換", "承辦文字": "汰換片段，", "動作": "備選動作"},
     ],
 }
 
@@ -61,9 +61,9 @@ def test_read_marks_single_mark(tmp_path):
 
 def test_load_rules_returns_rules_default_template(tmp_path):
     rules, default, template = fill_in_draft._load_rules(_write_config(tmp_path))
-    assert default == {"辦理文字": "", "動作": "none"}
+    assert default == {"承辦文字": "", "動作": "none"}
     assert len(rules) == 3
-    assert template == "擬:\n<辦理文字>陳閱後文存查。"
+    assert template == "擬:\n<承辦文字>陳閱後文存查。"
 
 
 def test_lookup_first_in_yaml_order_wins(tmp_path):
@@ -89,12 +89,12 @@ def test_lookup_empty_marks_falls_back_to_default(tmp_path):
 
 
 def test_render_substitutes_placeholder():
-    assert (fill_in_draft._render("擬:\n<辦理文字>陳閱後文存查。", "不參加，")
+    assert (fill_in_draft._render("擬:\n<承辦文字>陳閱後文存查。", "不參加，")
             == "擬:\n不參加，陳閱後文存查。")
 
 
 def test_render_empty_fragment_yields_clean_template():
-    assert (fill_in_draft._render("擬:\n<辦理文字>陳閱後文存查。", "")
+    assert (fill_in_draft._render("擬:\n<承辦文字>陳閱後文存查。", "")
             == "擬:\n陳閱後文存查。")
 
 

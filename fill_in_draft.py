@@ -1,8 +1,8 @@
-"""4-2:承辦中公文擬寫辦理文字。
+"""4-2:承辦中公文擬寫承辦文字。
 
 依 docs/superpowers/specs/2026-05-27-fill-in-draft-design.md。
 讀 summarize_doc 產出的總結檔取標記 → 查 fill_in_draft.yaml 對應表得
-「辦理文字 + 動作」→ 於公文閱覽器分頁填字、儲存、依動作決定不動作/陳會。
+「承辦文字 + 動作」→ 於公文閱覽器分頁填字、儲存、依動作決定不動作/陳會。
 """
 
 import pathlib
@@ -39,19 +39,19 @@ def _read_marks(extract_dir):
     return []
 
 
-_DEFAULT_TEMPLATE = "擬:\n<辦理文字>陳閱後文存查。"
+_DEFAULT_TEMPLATE = "擬:\n<承辦文字>陳閱後文存查。"
 
 
 def _load_rules(config_path=CONFIG_PATH):
     """讀 yaml 設定,回 (rules, default, template)。
 
-    rules:list of dict(標記/辦理文字/動作),依 yaml 順序(越上方越優先);
-    default:dict(辦理文字/動作);template:str(含 `<辦理文字>` placeholder)。
+    rules:list of dict(標記/承辦文字/動作),依 yaml 順序(越上方越優先);
+    default:dict(承辦文字/動作);template:str(含 `<承辦文字>` placeholder)。
     """
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     rules = cfg.get("rules") or []
-    default = cfg.get("default") or {"辦理文字": "", "動作": "none"}
+    default = cfg.get("default") or {"承辦文字": "", "動作": "none"}
     template = cfg.get("template") or _DEFAULT_TEMPLATE
     return rules, default, template
 
@@ -59,17 +59,17 @@ def _load_rules(config_path=CONFIG_PATH):
 def _lookup(marks, rules, default):
     """依 yaml 順序掃描 rules,第一個 `標記 in marks` 命中決定一切(越上方越優先)。
 
-    全部沒命中 → 回 default 的 (辦理文字, 動作)。
+    全部沒命中 → 回 default 的 (承辦文字, 動作)。
     """
     for rule in rules:
         if rule.get("標記") in marks:
-            return rule.get("辦理文字", ""), rule.get("動作", "none")
-    return default.get("辦理文字", ""), default.get("動作", "none")
+            return rule.get("承辦文字", ""), rule.get("動作", "none")
+    return default.get("承辦文字", ""), default.get("動作", "none")
 
 
 def _render(template, fragment):
-    """套用模板:把 `<辦理文字>` placeholder 換成 fragment。"""
-    return template.replace("<辦理文字>", fragment)
+    """套用模板:把 `<承辦文字>` placeholder 換成 fragment。"""
+    return template.replace("<承辦文字>", fragment)
 
 
 # 公文閱覽器 ExtJS 元素選擇器(2026-05-31 實機 dump 鎖定):
@@ -123,7 +123,7 @@ def _fill_text(driver, text):
 def _save(driver):
     """點左上 toolbar 磁碟片儲存鈕(.x-button 內含 .fa-floppy-o icon)。回 True/False。
 
-    填完辦理文字後一定要按儲存,否則 textarea 內容只在前端 viewmodel,
+    填完承辦文字後一定要按儲存,否則 textarea 內容只在前端 viewmodel,
     重新整理 / 切分頁就會掉。
     """
     try:
@@ -155,7 +155,7 @@ def _click_chen_hui(driver):
 
 
 def _dump_candidates(driver, label="root"):
-    """印出當前 frame 內可能的辦理文字輸入框/按鈕候選,供實機鎖定選擇器。
+    """印出當前 frame 內可能的承辦文字輸入框/按鈕候選,供實機鎖定選擇器。
 
     篩選條件:textarea/input/button/[role=button]/.x-button,以及含關鍵字
     (如擬、決行、陳會、退回、清稿、儲存、清除意見、還原意見) 的元素。
@@ -243,7 +243,7 @@ def _standalone_dump():
 
 
 def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
-    """4-2 進入點:讀標記→查表→填辦理文字→儲存→依動作不動作/陳會。
+    """4-2 進入點:讀標記→查表→填承辦文字→儲存→依動作不動作/陳會。
 
     全程不 raise:任何例外都記 log 並回 False,不影響 4-1 已完成的下載/總結。
     """
@@ -252,10 +252,10 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
         rules, default, template = _load_rules(config_path)
         fragment, action = _lookup(marks, rules, default)
         text = _render(template, fragment)
-        print(f"[fill_in_draft] 標記={marks} → 動作={action},辦理文字={text!r}")
+        print(f"[fill_in_draft] 標記={marks} → 動作={action},承辦文字={text!r}")
 
         if not _fill_text(driver, text):
-            print("[fill_in_draft] 填辦理文字失敗,中止(不儲存、不動作)。")
+            print("[fill_in_draft] 填承辦文字失敗,中止(不儲存、不動作)。")
             return False
         if not _save(driver):
             print("[fill_in_draft] 儲存失敗,中止(不動作)。")
