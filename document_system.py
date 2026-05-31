@@ -1076,53 +1076,100 @@ def _run_sidebar_cascade(driver):
 
 
 def pending_doc(driver):
-    """承辦中公文處理流程。第一階段：點承辦中清單最上方的公文（公文文號 column
-    第一筆 link）。後續（檢視內容、簽辦、送件等）依 DOM 結構再擴充。
+    """承辦中公文處理流程 — 迴圈處理直到承辦中=0 或遇停下條件。
 
-    呼叫時機：cascade 點完 sidebar「承辦中」之後（driver 此時 focus 在主文件，
-    內容區 dTreeContent iframe 內已載入承辦中清單）。
+    每輪：
+    1. 回主 window + default_content(清掉上輪殘留 frame 焦點)
+    2. 讀 sidebar「承辦中(N)」;N=0 → 全部處理完,結束
+    3. 切到 dTreeContent frame + 點公文文號 column 第一筆
+    4. handle_opened_document 跑 4-1(下載/解壓/總結) + 4-2(填字/儲存/陳會)
+    5. 看新分頁是否被陳會關閉:關了 → 公文已走,迴圈下一筆;沒關 → 動作=none
+       或 4-2 失敗,**停下印 stop banner**(避免無限迴圈撞同一筆)
 
-    流程：
-    1. 切到含「公文文號」表頭的 frame（通常是 dTreeContent）
-    2. 點公文文號 column 第一筆連結
-    3. sleep 3s 等系統回應，印導航後的 URL/title 觀察狀態
-    4. 切回主文件供後續操作
-
-    回 True 表示順利點到、False 表示中途失敗（呼叫端會收到，但目前 cascade 不
-    依賴回傳值決定下一步）。
+    回 True 表示「順利收尾」(承辦中歸 0),False 表示中途失敗或停下留待人工。
     """
-    print("[pending_doc] 承辦中公文處理流程開始")
-    print("[pending_doc] 切到內容 frame（找「公文文號」表頭）...")
-    target_xpath = "//th[contains(normalize-space(), '公文文號')]"
-    if not _switch_to_frame_with_xpath(driver, target_xpath, "公文文號表頭"):
-        print("[pending_doc] 切不到含承辦中清單的 frame，請手動處理。")
-        return False
-
-    print("[pending_doc] 點承辦中最上方的公文...")
-    if not _click_first_document_in_pending(driver):
-        print("[pending_doc] 點公文失敗，請手動處理。")
-        driver.switch_to.default_content()
-        return False
-
-    # 點公文後系統可能就地 frame 切到公文內容、或開新分頁、或彈 modal。
-    # 短 sleep 給新 window 開啟非同步完成 — Chrome 開 window ~ 0.3-0.5s
-    time.sleep(1)
+    # 迴圈處理承辦中公文,直到承辦中=0 或遇停下條件(動作=none / 4-2 失敗)。
+    # 第一輪 cascade 進來時 driver 在承辦中清單頁;每輪結束後新分頁應被陳會關閉,
+    # driver 回到主 window,重新讀 sidebar「承辦中(N)」決定要不要再做一筆。
+    print("[pending_doc] 承辦中公文處理流程開始（迴圈直到 0）")
     try:
-        print(f"[pending_doc] 點開後 URL：{driver.current_url}")
-        print(f"[pending_doc] 點開後標題：{driver.title}")
-        handles = driver.window_handles
-        if len(handles) > 1:
-            print(f"[pending_doc] 偵測到 {len(handles)} 個 window — 公文內容可能開在新分頁")
+        main_handle = driver.current_window_handle
     except Exception as e:
-        print(f"[pending_doc] 讀狀態失敗：{type(e).__name__}: {e}")
+        print(f"[pending_doc] 讀 main_handle 失敗：{type(e).__name__}: {e}")
+        return False
 
-    # 切回主文件,chain 給 pending_doc_handler 處理新分頁(公文閱覽器)。
-    # 「點完公文 + 新視窗開啟後」的處理 delegate 給獨立模組,方便階段測試
-    # 與職責切割。handle_opened_document 內會切到新 window 做後續動作。
-    driver.switch_to.default_content()
     from pending_doc_handler import handle_opened_document
-    handle_opened_document(driver)
-    return True
+
+    iteration = 0
+    while True:
+        iteration += 1
+        # Step 1：回主 window + 主 frame(避免上輪殘留 frame 焦點影響讀 sidebar)
+        try:
+            driver.switch_to.window(main_handle)
+        except Exception as e:
+            print(f"[pending_doc] 切回主 window 失敗：{type(e).__name__}: {e}")
+            return False
+        driver.switch_to.default_content()
+
+        # Step 2：讀「承辦中(N)」,N=0 即結束
+        count = _get_sidebar_paren_count(driver, "承辦中")
+        print(f"[pending_doc] iteration #{iteration} — 承辦中 = {count}")
+        if count == 0:
+            print("[pending_doc] 承辦中=0,迴圈完成,所有承辦中公文已處理。")
+            return True
+        if count < 0:
+            _print_stop_banner("無法判讀承辦中數",
+                               "請手動檢視承辦中清單,然後再跑 python main.py")
+            return False
+
+        # Step 3：切到 dTreeContent frame + 點承辦中第一筆
+        target_xpath = "//th[contains(normalize-space(), '公文文號')]"
+        if not _switch_to_frame_with_xpath(driver, target_xpath, "公文文號表頭"):
+            _print_stop_banner("切不到承辦中清單 frame",
+                               "請手動檢視主 window 內容,然後再跑 python main.py")
+            return False
+        if not _click_first_document_in_pending(driver):
+            driver.switch_to.default_content()
+            _print_stop_banner("點不到承辦中第一筆",
+                               "請手動檢視承辦中清單,然後再跑 python main.py")
+            return False
+
+        # Step 4：等新分頁開 + 交給 handle_opened_document(內含 4-1 下載+總結 + 4-2 fill_in_draft)
+        time.sleep(1)
+        driver.switch_to.default_content()
+        handle_opened_document(driver)
+
+        # Step 5：用 sidebar「承辦中(N)」數變化判定公文是否離開,不能用 window 數
+        # (陳會送出過程會短暫多開對話框 → window 從 2 → 3 → 1,看 1 秒後的 window 數
+        # 會誤判為「公文沒走」)。給陳會對話框 + 系統 reload 足夠時間後重讀 sidebar。
+        driver.switch_to.window(main_handle)
+        driver.switch_to.default_content()
+        n_after = -1
+        for _ in range(10):  # 最多等 10s 觀察 sidebar 數變化
+            time.sleep(1)
+            n_after = _get_sidebar_paren_count(driver, "承辦中")
+            if 0 <= n_after < count:
+                break
+        print(f"[pending_doc] iteration #{iteration} 處理完,承辦中:{count} → {n_after}")
+        if n_after < 0:
+            _print_stop_banner("處理後無法判讀承辦中數",
+                               "請手動檢視 sidebar 狀態,然後再跑 python main.py")
+            return False
+        if n_after >= count:
+            _print_stop_banner(
+                f"公文未離開承辦中(數={count} 沒變) — 動作=none / 對話框未處理 / 4-2 失敗",
+                "請人工接手目前公文(填字/儲存/送出),完成後再跑 python main.py 處理其他承辦中公文")
+            return False
+        print(f"[pending_doc] iteration #{iteration} 公文已離開承辦中,回頂繼續迴圈。")
+
+
+def _print_stop_banner(reason, advice):
+    """在 stdout 印明顯區隔的停下訊息,使用者在 PowerShell 容易看到。"""
+    bar = "=" * 70
+    print(bar)
+    print(f"[STOP] {reason}")
+    print(f"       {advice}")
+    print(bar)
 
 
 def circulate_doc(driver):
