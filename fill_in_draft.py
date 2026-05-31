@@ -81,6 +81,94 @@ def _click_chen_hui(driver):
     return False
 
 
+def _dump_candidates(driver, label="root"):
+    """印出當前 frame 內可能的辦理文字輸入框/按鈕候選,供實機鎖定選擇器。
+
+    篩選條件:textarea/input/button/[role=button]/.x-button,以及含關鍵字
+    (如擬、決行、陳會、退回、清稿、儲存、清除意見、還原意見) 的元素。
+    """
+    try:
+        rows = driver.execute_script(
+            """
+            const out = [];
+            const sel = 'textarea, input, button, [role=button], [class*=button], [class*=btn]';
+            const KW = ['如擬','決行','陳會','退回','清稿','變更流程','儲存',
+                        '清除意見','還原意見','意見彙整','我的意見','承辦','會辦','核決'];
+            document.querySelectorAll(sel).forEach(el => {
+                const text = (el.innerText || el.value || el.placeholder || '').trim();
+                const aria = el.getAttribute('aria-label') || '';
+                const title = el.getAttribute('title') || '';
+                const blob = text + ' ' + aria + ' ' + title;
+                const hit = KW.some(k => blob.indexOf(k) >= 0);
+                if (hit || el.tagName === 'TEXTAREA') {
+                    const rect = el.getBoundingClientRect();
+                    out.push({
+                        tag: el.tagName,
+                        id: el.id || '',
+                        cls: (el.className || '').toString().slice(0, 120),
+                        text: text.slice(0, 40),
+                        ph:   (el.placeholder || '').slice(0, 40),
+                        aria: aria.slice(0, 40),
+                        title: title.slice(0, 40),
+                        x: Math.round(rect.x), y: Math.round(rect.y),
+                        w: Math.round(rect.width), h: Math.round(rect.height),
+                        vis: rect.width > 0 && rect.height > 0,
+                    });
+                }
+            });
+            return out;
+            """) or []
+        print(f"[fill_in_draft] _dump_candidates({label}) — {len(rows)} 個候選:")
+        for r in rows:
+            print(f"    <{r['tag']}> id={r['id']!r} cls={r['cls']!r}")
+            print(f"        text={r['text']!r} ph={r['ph']!r} "
+                  f"aria={r['aria']!r} title={r['title']!r}")
+            print(f"        rect=({r['x']},{r['y']},{r['w']}x{r['h']}) vis={r['vis']}")
+    except Exception as e:
+        print(f"[fill_in_draft] _dump_candidates({label}) 失敗:{type(e).__name__}: {e}")
+
+
+def _dump_all_frames(driver):
+    """對主 frame + 每個 iframe 各跑一次 _dump_candidates。"""
+    print(f"[fill_in_draft] === dump 主 frame ===")
+    driver.switch_to.default_content()
+    _dump_candidates(driver, label="main")
+    try:
+        frames = driver.find_elements("css selector", "iframe, frame")
+    except Exception as e:
+        print(f"[fill_in_draft] 找 iframe 失敗:{type(e).__name__}: {e}")
+        return
+    print(f"[fill_in_draft] 主 frame 內共 {len(frames)} 個 iframe")
+    for i, fr in enumerate(frames):
+        try:
+            fr_id = fr.get_attribute("id") or ""
+            fr_src = (fr.get_attribute("src") or "")[:80]
+            fr_cls = (fr.get_attribute("class") or "")[:60]
+        except Exception:
+            fr_id = fr_src = fr_cls = "?"
+        print(f"[fill_in_draft] === dump iframe[{i}] id={fr_id!r} cls={fr_cls!r} src={fr_src!r} ===")
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(fr)
+            _dump_candidates(driver, label=f"iframe[{i}]:{fr_id or fr_cls or i}")
+        except Exception as e:
+            print(f"[fill_in_draft] 切 iframe[{i}] 失敗:{type(e).__name__}: {e}")
+        finally:
+            driver.switch_to.default_content()
+
+
+def _standalone_dump():
+    """standalone dump 模式:attach Chrome → 找閱覽器分頁 → 對所有 frame dump 候選。"""
+    driver = _attach_existing_chrome()
+    if driver is None:
+        return False
+    handle, doSno = _find_viewer_window(driver)
+    if handle is None:
+        return False
+    _dump_all_frames(driver)
+    return True
+
+
 def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
     """4-2 進入點:讀標記→查表→填辦理文字→儲存→依動作不動作/陳會。
 
@@ -201,9 +289,16 @@ if __name__ == "__main__":
     # 從 URL 抽 doSno → 推 document_download/<MW+doSno>/ → 跑 fill_in_draft。
     # 前提:Chrome 已由 main.py 啟動(會自動開 :9222),且 main.py 跑過後 Chrome
     # 仍停在閱覽器分頁(detach=True 預設留著)。
+    #
+    # 子命令:
+    #   (無)   執行 4-2(讀標記+查表+填字+儲存+依動作)
+    #   dump   只 dump 閱覽器各 frame 的辦理面板候選元素,供鎖定選擇器
     import sys
 
     from taipeion_login_selenium import _setup_stdout_logging
     _setup_stdout_logging()
-    ok = _standalone_attach_and_run()
+    if len(sys.argv) > 1 and sys.argv[1] == "dump":
+        ok = _standalone_dump()
+    else:
+        ok = _standalone_attach_and_run()
     sys.exit(0 if ok else 1)
