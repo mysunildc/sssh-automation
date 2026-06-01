@@ -98,13 +98,16 @@ def test_render_empty_fragment_yields_clean_template():
 
 # ── fill_in_draft 主流程 ──────────────────────────────────────────────────
 
-def _patch_selenium(monkeypatch, calls, fill_ok=True, save_ok=True, chen_ok=True):
+def _patch_selenium(monkeypatch, calls, fill_ok=True, save_ok=True, chen_ok=True,
+                    pincode_ok=True):
     monkeypatch.setattr(fill_in_draft, "_fill_text",
                         lambda driver, text: calls.append(("fill", text)) or fill_ok)
     monkeypatch.setattr(fill_in_draft, "_save",
                         lambda driver: calls.append(("save",)) or save_ok)
     monkeypatch.setattr(fill_in_draft, "_click_chen_hui",
                         lambda driver: calls.append(("chen_hui",)) or chen_ok)
+    monkeypatch.setattr(fill_in_draft, "_handle_chen_hui_pincode",
+                        lambda driver: calls.append(("pincode",)) or pincode_ok)
 
 
 def test_fill_in_draft_action_none_from_summary(tmp_path, monkeypatch):
@@ -124,7 +127,20 @@ def test_fill_in_draft_action_chen_hui_from_summary(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is True
-    assert calls == [("fill", "擬:\n本案為宣導，陳閱後文存查。"), ("save",), ("chen_hui",)]
+    assert calls == [("fill", "擬:\n本案為宣導，陳閱後文存查。"),
+                     ("save",), ("chen_hui",), ("pincode",)]
+
+
+def test_fill_in_draft_pincode_fails_returns_false(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類:資安\n##本案為宣導，\n###陳會\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls, pincode_ok=False)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is False
+    # chen_hui 已 click,pincode 處理失敗 → 整體回 False
+    assert calls == [("fill", "擬:\n本案為宣導，陳閱後文存查。"),
+                     ("save",), ("chen_hui",), ("pincode",)]
 
 
 def test_fill_in_draft_backup_action_is_noop(tmp_path, monkeypatch):

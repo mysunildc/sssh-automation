@@ -771,20 +771,38 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
         print(f"[ERROR] 讀 window_handles 失敗:{type(e).__name__}: {e}")
         return False
 
-    # 等新 window 出現
-    deadline = time.time() + popup_timeout
+    # Fast-path:先掃既有 window,若已有 localhost:16888 的 popup 直接接手。
+    # (4-2 陳會場景:陳會點下去後 popup 可能在本函式被呼叫前就開了;
+    #  4-結案存查場景:popup 通常是本函式內等的「新 window」,fast-path 不會命中。)
     new_handle = None
-    while time.time() < deadline:
+    for h in list(original_handles):
         try:
-            handles = driver.window_handles
+            driver.switch_to.window(h)
+            if "16888" in (driver.current_url or ""):
+                new_handle = h
+                print(f"      OK:接手既有 pinCode 對話框 url={driver.current_url}")
+                break
         except Exception:
-            time.sleep(0.3)
             continue
-        diff = set(handles) - original_handles
-        if diff:
-            new_handle = next(iter(diff))
-            break
-        time.sleep(0.3)
+    if not new_handle:
+        # 切回原 window 後再等新 popup,避免 next loop 在錯誤 handle 上跑
+        try:
+            driver.switch_to.window(original_handle)
+        except Exception:
+            pass
+        # 等新 window 出現
+        deadline = time.time() + popup_timeout
+        while time.time() < deadline:
+            try:
+                handles = driver.window_handles
+            except Exception:
+                time.sleep(0.3)
+                continue
+            diff = set(handles) - original_handles
+            if diff:
+                new_handle = next(iter(diff))
+                break
+            time.sleep(0.3)
     if not new_handle:
         print(f"[ERROR] {popup_timeout}s 內沒有偵測到 pinCode 視窗")
         return False

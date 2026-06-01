@@ -146,6 +146,28 @@ def _save(driver):
         return False
 
 
+def _print_stop_banner(reason, advice):
+    """在 stdout 印明顯區隔的停下訊息,使用者在 PowerShell 容易看到。"""
+    bar = "=" * 70
+    print(bar)
+    print(f"[STOP] {reason}")
+    print(f"       {advice}")
+    print(bar)
+
+
+def _handle_chen_hui_pincode(driver):
+    """陳會送出後 KdApp 跳 localhost:16888/doPostMsg pinCode 對話框,需自然人憑證
+    再次簽章。重用 document_closure 已寫好的 popup handler(自動填 PIN + 點確定)。
+    回 True/False。
+    """
+    try:
+        from document_closure.document_closure import _handle_pincode_popup
+        return _handle_pincode_popup(driver)
+    except Exception as e:
+        print(f"[fill_in_draft] _handle_chen_hui_pincode 例外:{type(e).__name__}: {e}")
+        return False
+
+
 def _click_chen_hui(driver, timeout=15):
     """點「陳會」鈕(div.x-button 內含 span.x-button-label='陳會')。回 True/False。
 
@@ -281,15 +303,23 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
         print(f"[fill_in_draft] 承辦文字={fragment!r} 動作={action!r} → text={text!r}")
 
         if not _fill_text(driver, text):
-            print("[fill_in_draft] 填承辦文字失敗,中止(不儲存、不動作)。")
+            _print_stop_banner("填承辦文字失敗 — textarea 找不到或寫入後讀回不一致",
+                               "請手動檢視閱覽器分頁「我的意見」欄,或重跑 fill_in_draft.py dump 重新鎖定 selector")
             return False
         if not _save(driver):
-            print("[fill_in_draft] 儲存失敗,中止(不動作)。")
+            _print_stop_banner("儲存失敗 — toolbar 磁碟片鈕找不到 / 點不到",
+                               "請手動按閱覽器左上磁碟片 icon 儲存,或重跑 fill_in_draft.py dump 重新鎖定")
             return False
 
         if action == "陳會":
             if not _click_chen_hui(driver):
-                print("[fill_in_draft] 陳會失敗;狀態停在『已儲存未送』,可人工接手。")
+                _print_stop_banner("陳會鈕點擊失敗(已儲存但未送出)",
+                                   "請手動按閱覽器內「陳會」鈕,或重跑 fill_in_draft.py dump 重新鎖定")
+                return False
+            # 陳會送出 → 系統開 localhost:16888/doPostMsg pinCode 對話框,需 PIN 簽章
+            if not _handle_chen_hui_pincode(driver):
+                _print_stop_banner("陳會 pinCode 對話框處理失敗(公文未送出)",
+                                   "請手動在 pinCode 對話框輸入 PIN 並按確定;確認 id.txt 內容正確")
                 return False
         elif action == "none":
             pass
@@ -297,7 +327,8 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
             print(f"[fill_in_draft] 動作 {action!r} 目前未實作,僅儲存不執行後續。")
         return True
     except Exception as e:
-        print(f"[fill_in_draft] 例外(不影響 4-1):{type(e).__name__}: {e}")
+        _print_stop_banner(f"4-2 主流程例外:{type(e).__name__}: {e}",
+                           "請看 run.log 完整 traceback;4-1 下載/總結已完成,不影響")
         return False
 
 
@@ -373,12 +404,18 @@ def _standalone_attach_and_run():
     """
     driver = _attach_existing_chrome()
     if driver is None:
+        _print_stop_banner("attach 既有 Chrome 失敗 — 沒開 :9222 port",
+                           "跑 scripts\\close-profile2-chrome.ps1 後重跑 python main.py(會自動帶 :9222)")
         return False
     handle, doSno = _find_viewer_window(driver)
     if handle is None:
+        _print_stop_banner("找不到公文閱覽器分頁",
+                           "確認 Chrome 內有停在 https://edoc.gov.taipei/tcqb/oa/index.html?app=editor... 的分頁")
         return False
     extract_dir = _resolve_extract_dir(doSno)
     if extract_dir is None:
+        _print_stop_banner(f"找不到對應 extract_dir(doSno={doSno})",
+                           f"確認 document_download/ 內有以 {doSno} 結尾的目錄(通常是 MWAA{doSno})")
         return False
     print(f"[fill_in_draft] extract_dir={extract_dir}")
     return fill_in_draft(driver, extract_dir)
