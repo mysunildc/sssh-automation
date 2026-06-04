@@ -3,8 +3,9 @@ click_document.py
 TAIPEION 入口網儀表板 — 檢查「公文(學校)」方塊上方的待辦數字，依結果決定動作。
 
 設計：
-  - 若待辦數 = 0：停在儀表板，程式結束（不點方塊）
-  - 若待辦數 > 0：點方塊 → 進入公文系統 → 呼叫 click_document() 做點選之後的後續工作
+  - 不論待辦數為何（0、>0、判讀失敗）都點方塊進入 edoc：即使「公文(學校)=0」，
+    進去後右上「催辦訊息」仍可能 > 0，需進催辦通知頁簽收（催辦與公文待辦數獨立）。
+  - 點方塊 → 進入公文系統 → 呼叫 click_document() 做點選之後的後續工作
 
 呼叫方式：
   1) 從 main.py 自然人憑證登入成功後串接：
@@ -205,15 +206,16 @@ def click_document(driver):
 
 
 def click_document_card(driver=None):
-    """主入口：檢查『公文(學校)』方塊上方的待辦數字。
-      - 數字 = 0：停在儀表板，程式結束（return False，不點方塊也不呼叫 click_document）
-      - 數字 > 0：點方塊 → 呼叫 click_document() 做後續工作
-      - 數字無法判讀（-1）：保守不點，請使用者手動處理
+    """主入口：讀『公文(學校)』方塊上方的待辦數（僅供 log），不論結果都點方塊進入 edoc。
+
+    即使待辦數 = 0 仍要進去 —— 進 edoc 後右上「催辦訊息」可能 > 0，需進催辦通知頁
+    簽收（催辦與公文待辦數獨立計算）。判讀失敗（-1）一樣嘗試進入，把實際狀態交給
+    下游 process_document_system 判斷。
 
     參數：
         driver: 既有 Selenium WebDriver；若為 None 則自動呼叫 login_taipeion_selenium 重新登入。
     回傳：
-        True 表示已點方塊並進入後續工作；False 表示沒點（待辦 0 或判讀失敗或點擊失敗）。
+        True 表示已點方塊並進入後續工作；False 表示點擊失敗（沒進到 edoc）。
     """
     driver = _ensure_driver(driver)
     if driver is None:
@@ -222,14 +224,13 @@ def click_document_card(driver=None):
     print("[click_document_card] 等儀表板載入後讀『公文(學校)』待辦數...")
     count = _get_document_count(driver)
 
-    if count == 0:
-        print("[click_document_card] 公文(學校) 待辦數 = 0，無待辦公文，停在儀表板，程式結束。")
-        return False
-    if count < 0:
-        print("[click_document_card] 無法判讀公文(學校) 待辦數，保守不點，請手動處理。")
-        return False
+    if count > 0:
+        print(f"[click_document_card] 公文(學校) 待辦數 = {count}，點方塊進入公文系統...")
+    elif count == 0:
+        print("[click_document_card] 公文(學校) 待辦數 = 0，仍點方塊進入 edoc 檢查催辦訊息...")
+    else:
+        print("[click_document_card] 無法判讀公文(學校) 待辦數，仍嘗試點方塊進入 edoc...")
 
-    print(f"[click_document_card] 公文(學校) 待辦數 = {count}，點方塊進入公文系統...")
     if not _click_document_card(driver):
         print("[click_document_card] 點擊失敗 — 列印目前頁面狀態以利除錯：")
         try:

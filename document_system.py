@@ -54,12 +54,18 @@ SELECT_ALL_CHECKBOX_XPATHS = [
 ]
 
 # 表格上方亮青色「簽收」按鈕 XPath 候選。
-# 實測 (2026-05-19 dTreeContent dump)：edoc 的簽收按鈕是
+# 實測 (2026-05-19 dTreeContent dump)：待簽收清單的簽收按鈕是
 #   <input value="簽收" class="toolbar_default list-btn-success">
 # （type 屬性沒寫或不是 button/submit），且 <input> 沒有 textContent，所以
-# normalize-space() 找不到 — 必須用 @value='簽收' 才命中。
+# normalize-space() 找不到 — 必須用 @value 才命中。
+# 補 (2026-06-04 催辦通知清單實機)：催辦通知的簽收按鈕 value 是「簽　   收」
+#   <input value="簽　   收" class="toolbar_default form-btn-success">
+# 字間夾全形/半形空白、class 也不同 — 故加 contains(簽)+contains(收) 的候選同時
+# 涵蓋「簽收」與「簽　   收」，並排除「未簽收／待簽收」狀態字樣的誤命中。
 SIGNOFF_BUTTON_XPATHS = [
-    "//input[@value='簽收']",                                # ← 實測命中 (Important)
+    "//input[@value='簽收']",                                # ← 待簽收清單實測命中
+    "//input[contains(@value,'簽') and contains(@value,'收') "  # ← 催辦通知「簽　   收」
+    "and not(contains(@value,'未')) and not(contains(@value,'待'))]",
     "//*[@value='簽收']",                                    # 其他 form element 也用 value
     "//button[normalize-space()='簽收']",
     "//a[normalize-space()='簽收']",
@@ -367,6 +373,10 @@ def _switch_to_signoff_frame(driver, timeout=15):
     target_xpath = (
         "//input[@value='簽收'] "
         "| //*[@value='簽收'] "
+        # 催辦通知清單簽收鈕 value=「簽　   收」(字間夾空白) — 2026-06-04 實機發現,
+        # contains(簽)+contains(收) 同時涵蓋「簽收」與「簽　   收」,排除未/待簽收
+        "| //input[contains(@value,'簽') and contains(@value,'收') "
+        "and not(contains(@value,'未')) and not(contains(@value,'待'))] "
         "| //*[normalize-space()='簽收' "
         "and not(contains(normalize-space(), '待簽收')) "
         "and not(contains(normalize-space(), '對方未簽收')) "
@@ -928,13 +938,49 @@ def _click_urgent_message(driver, timeout=10):
     return False
 
 
+def _select_all_and_signoff(driver, count, label):
+    """切到內容 frame → 全選 checkbox → 點「簽收」。待簽收清單與催辦通知清單共用。
+
+    edoc 是 frame-based 排版，清單與「簽收」按鈕都在 dTreeContent iframe 內，操作前
+    必須先切 frame。**警告**：簽收會改變公文狀態（待簽收→承辦中／催辦通知標記為已
+    簽收），無 admin 介入無法復原，呼叫端須先確認清單筆數 > 0 再呼叫。
+
+    回 True 表示「簽收」已送出；False 表示中途任一步失敗（frame／checkbox／按鈕）。
+    結束時都會切回 default_content，方便後續操作。
+    """
+    print(f"[WARN] 即將自動執行：勾選 {count} 筆{label} + 點「簽收」按鈕")
+    print(f"[WARN] 簽收無法復原（無 admin 介入無法還原）")
+    print("[document_system] 切換到內容 frame...")
+    if not _switch_to_signoff_frame(driver):
+        print(f"[document_system] 切不到內容 frame，跳過{label}簽收動作。請手動處理。")
+        return False
+    if not _check_select_all(driver):
+        print(f"[document_system] 全選 checkbox 失敗，不執行{label}簽收。請手動處理。")
+        driver.switch_to.default_content()
+        return False
+    if not _click_signoff_button(driver):
+        print(f"[document_system] 找不到「簽收」按鈕，請手動處理。")
+        driver.switch_to.default_content()
+        return False
+    # 簽收後等系統回應（可能跳 JS confirm 由 unhandledPromptBehavior=accept 自動接受、
+    # 或跳轉、或就地刷新清單）。driver.current_url 永遠是主文件 URL，不受 frame 影響。
+    time.sleep(3)
+    try:
+        print(f"[document_system] {label}簽收後 URL：{driver.current_url}")
+        print(f"[document_system] {label}簽收後標題：{driver.title}")
+    except Exception as e:
+        print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+    driver.switch_to.default_content()
+    return True
+
+
 def process_document_system(driver):
     """公文系統處理主入口。driver 必須已導航到 edoc 公文首頁。
 
     流程：
         1. 確認 current_url 在 edoc.gov.taipei
         2. 讀右上「催辦訊息N」數字
-           - > 0：點進催辦頁，sleep 2 印 URL/title 觀察
+           - > 0：點進催辦通知頁 → 全選 + 點「簽收」（簽收所有未簽收的催辦通知）
            - = 0：跳過
            - 判讀失敗 (-1)：保守不點，印警告繼續
         3. 讀左側 sidebar「待簽收(N)」數字（不管催辦結果如何都檢查 — sidebar
@@ -965,15 +1011,18 @@ def process_document_system(driver):
     elif urgent_count == 0:
         print("[document_system] 催辦訊息 = 0，無待辦催辦，跳過點擊。")
     else:
-        print(f"[document_system] 催辦訊息 = {urgent_count}，點選進入催辦頁...")
+        print(f"[document_system] 催辦訊息 = {urgent_count}，點選進入催辦通知頁...")
         if not _click_urgent_message(driver):
             return False
         time.sleep(2)
         try:
-            print(f"[document_system] 催辦頁 URL：{driver.current_url}")
-            print(f"[document_system] 催辦頁標題：{driver.title}")
+            print(f"[document_system] 催辦通知頁 URL：{driver.current_url}")
+            print(f"[document_system] 催辦通知頁標題：{driver.title}")
         except Exception as e:
             print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+        # 進催辦通知清單後：全選未簽收的催辦通知 + 點「簽收」（與待簽收清單同結構，
+        # 都在 dTreeContent frame 內、同一顆 value='簽收' 按鈕）
+        _select_all_and_signoff(driver, urgent_count, "催辦通知")
 
     # ── 待簽收 ─────────────────────────────────────────────────────────────
     print("[document_system] 讀左側 sidebar「待簽收」數...")
@@ -993,33 +1042,8 @@ def process_document_system(driver):
         except Exception as e:
             print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
 
-        # 待簽收清單載入後：先切換到內容 frame 才能找到 checkbox + 簽收按鈕
-        # （edoc 是 frame-based 排版，內容區在名為 dTreeContent 的 iframe）
-        # **警告**：簽收會改變公文狀態（待簽收 → 承辦中），無 admin 介入無法復原
-        print(f"[WARN] 即將自動執行：勾選 {signoff_count} 筆待簽收 + 點「簽收」按鈕")
-        print(f"[WARN] 簽收會把公文從「待簽收」狀態改為「承辦中」，無法復原")
-        print("[document_system] 切換到內容 frame...")
-        if not _switch_to_signoff_frame(driver):
-            print("[document_system] 切不到內容 frame，跳過簽收動作。請手動處理。")
-        elif not _check_select_all(driver):
-            print("[document_system] 全選 checkbox 失敗，不執行簽收。請手動處理。")
-            driver.switch_to.default_content()
-        elif not _click_signoff_button(driver):
-            print("[document_system] 找不到「簽收」按鈕，請手動處理。")
-            driver.switch_to.default_content()
-        else:
-            # 簽收後等系統回應（可能跳 JS confirm 由 unhandledPromptBehavior=accept
-            # 自動接受、或跳轉到下一頁、或就地刷新清單）
-            time.sleep(3)
-            try:
-                # 注意：driver 此時還在 frame 內，current_url/title 讀的是主文件
-                # （driver.current_url 永遠是主文件 URL，不受 frame switch 影響）
-                print(f"[document_system] 簽收後 URL：{driver.current_url}")
-                print(f"[document_system] 簽收後標題：{driver.title}")
-            except Exception as e:
-                print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
-            # 切回主文件，後續操作（若有）才正常
-            driver.switch_to.default_content()
+        # 待簽收清單載入後：全選 + 點「簽收」（待簽收 → 承辦中），與催辦通知共用 helper
+        _select_all_and_signoff(driver, signoff_count, "待簽收")
 
     # ── Sidebar cascade：承辦中 → 受會案件 → 待結案 ──────────────────────
     # 走到這代表 待簽收 階段已處理完畢（signoff 或 skip）。接下來檢查 sidebar 的
