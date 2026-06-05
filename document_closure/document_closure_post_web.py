@@ -16,7 +16,12 @@ import glob
 import html
 import os
 import re
+import time
 from datetime import datetime
+
+# 校網首頁(判登入/登出狀態)與圖書館公告板。
+HOME_URL = "https://www.sssh.tp.edu.tw/nss/p/index"
+ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/library"
 
 # 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
 ANNOUNCE_KEYWORD = "於官網公告"
@@ -133,8 +138,75 @@ def _stop_banner(reason, hint=""):
     print("!" * 60 + "\n")
 
 
+def _close_school_tab(driver):
+    """關掉目前(校網)分頁、切回剩下的第一個分頁(edoc 主分頁)。"""
+    try:
+        if len(driver.window_handles) <= 1:
+            return
+        driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+    except Exception as e:
+        print(f"      [WARN] 關校網分頁失敗:{type(e).__name__}: {e}")
+
+
 def _open_and_login_sssh(driver):
-    raise NotImplementedError  # Task 4 實作
+    """開新分頁到校網首頁:右上「登出」=已登入(跳過);「登入」=點它進登入頁、用
+    env.env 帳密登入(使用者指定流程)。
+
+    成功 → True(校網分頁留在前景供發佈);失敗 → 關掉新分頁、回 False。
+    """
+    from selenium.webdriver.common.by import By
+    from taipeion_login_selenium import _read_config
+
+    driver.switch_to.new_window("tab")
+    driver.get(HOME_URL)
+    time.sleep(2)
+
+    # 首頁右上:有「登出」連結 = 已登入
+    state = driver.execute_script("""
+        const links = [...document.querySelectorAll('a')];
+        if (links.some(a => (a.innerText||'').trim() === '登出')) return 'logged_in';
+        if (links.some(a => (a.innerText||'').trim() === '登入')) return 'need_login';
+        return 'unknown';
+    """)
+    if state == 'logged_in':
+        print("[post_web] 首頁顯示「登出」→ 已登入。")
+        return True
+
+    # 點「登入」→ 轉到 /passport/tpeEntrance 登入頁
+    driver.execute_script("""
+        for (const a of document.querySelectorAll('a')) {
+            if ((a.innerText||'').trim() === '登入') { a.click(); return; }
+        }
+    """)
+    time.sleep(2.5)
+
+    if not driver.find_elements(By.ID, "login-user-name"):
+        if "passport" not in driver.current_url:
+            print("[post_web] 點登入後未見帳密框且已離開 passport → 視為已登入。")
+            return True
+        _stop_banner("點登入後找不到帳密框", "實機檢查登入頁 DOM")
+        _close_school_tab(driver)
+        return False
+
+    acc, pw_ = _read_config("sssh_account"), _read_config("sssh_password")
+    if not acc or not pw_:
+        _stop_banner("env.env 缺 sssh_account / sssh_password", "在 env.env 填入校網帳密")
+        _close_school_tab(driver)
+        return False
+
+    u = driver.find_element(By.ID, "login-user-name"); u.clear(); u.send_keys(acc)
+    p = driver.find_element(By.ID, "login-password"); p.clear(); p.send_keys(pw_)
+    btn = driver.find_element(By.CSS_SELECTOR, "button.btn-primary[type=submit]")
+    driver.execute_script("arguments[0].click();", btn)  # 直接 click 被覆蓋層攔截,用 JS click
+    time.sleep(3)
+
+    if driver.find_elements(By.ID, "login-user-name"):
+        _stop_banner("登入後仍見帳密框(帳密錯或有 2FA/驗證碼)", "手動登入後重跑")
+        _close_school_tab(driver)
+        return False
+    print("[post_web] ✓ 校網登入成功。")
+    return True
 
 
 def _submit_announcement(driver, title, body):
