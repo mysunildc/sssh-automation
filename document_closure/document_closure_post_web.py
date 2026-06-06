@@ -32,6 +32,8 @@ ANNOUNCE_KEYWORD = "於官網公告"
 _SUBJECT_RE = re.compile(r'^\*?\s*主旨\s*[:：]\s*(.+)$')
 # 條列行：1. / 1、 / 1.（後接內容，可無空白）。
 _BODY_ITEM_RE = re.compile(r'^\s*\d+\s*[.、]\s*.+$')
+# 存查分類行：首行 `#存查分類:研習 03750401` → 取類別名(研習/資安…)。
+_CATEGORY_RE = re.compile(r'^#\s*存查分類\s*[:：]\s*(\S+)')
 
 
 def _parse_summary_text(text):
@@ -47,11 +49,17 @@ def _parse_summary_text(text):
     """
     handling = None
     title = None
+    category = None
     body_lines = []
     subject_seen = False
 
     for raw in text.splitlines():
         line = raw.strip()
+        if category is None:
+            mc = _CATEGORY_RE.match(line)
+            if mc:
+                category = mc.group(1)
+                continue
         if handling is None and line.startswith("##"):
             handling = line.lstrip("#").strip() or None
             continue
@@ -66,7 +74,8 @@ def _parse_summary_text(text):
 
     if title is None or not body_lines:
         return None
-    return {"handling": handling, "title": title, "body": "\n".join(body_lines)}
+    return {"handling": handling, "title": title, "body": "\n".join(body_lines),
+            "category": category}
 
 
 def _parse_summary(extract_dir):
@@ -97,6 +106,16 @@ def _body_to_html(body):
     """
     lines = [ln for ln in body.split("\n") if ln.strip()]
     return "".join(f"<p>{html.escape(ln)}</p>" for ln in lines)
+
+
+def _find_attachments(extract_dir):
+    """回 extract_dir 內所有檔名含 ATTCH 的檔案絕對路徑(公文附件 *ATTCH*),排序後回傳。"""
+    try:
+        names = os.listdir(extract_dir)
+    except OSError:
+        return []
+    return [os.path.abspath(os.path.join(extract_dir, n))
+            for n in sorted(names) if "attch" in n.lower()]
 
 
 def _posted_marker_path(extract_dir):
@@ -211,10 +230,13 @@ def _open_and_login_sssh(driver):
     return True
 
 
-def _submit_announcement(driver, title, body):
-    """到 圖書館(/nss/s/main/p/library) 的圖書館公告模組點「新增公告」,
-    填標題+內容,點「發布」。
+def _submit_announcement(driver, title, body, attachments=None, sync_keyword=None):
+    """到 圖書館(/nss/s/main/p/library) 圖書館公告模組(先進「模組」編輯模式)點「新增公告」,
+    填標題+內容+發布者、勾置頂、上傳附件、選同步分類,點「發布」。
 
+    參數:
+        attachments   附件檔案絕對路徑 list(公文 *ATTCH* 檔);None/空則不傳附件。
+        sync_keyword  「同步顯示至」要勾的分類選項關鍵字(如「習資訊」「處室公告」);None 則不選。
     完成(成功或失敗)都會關掉校網分頁、切回 edoc。成功 → True。
     """
     from selenium.webdriver.common.by import By
@@ -284,6 +306,63 @@ def _submit_announcement(driver, title, body):
         print(f"[post_web] 置頂={pinned}")
         time.sleep(0.5)
 
+        # 附件:點「附件」→「新增檔案」,把 *ATTCH* 檔 send_keys 給 file input(multiple)。
+        if attachments:
+            driver.execute_script("""
+                for (const b of document.querySelectorAll('button,a')) {
+                    if ((b.innerText||'').trim() === '附件') { b.click(); return; }
+                }""")
+            time.sleep(0.8)
+            driver.execute_script("""
+                for (const b of document.querySelectorAll('button,a,li,div,span')) {
+                    if ((b.innerText||'').trim() === '新增檔案') { b.click(); return; }
+                }""")
+            time.sleep(1)
+            file_inputs = driver.find_elements(
+                By.CSS_SELECTOR,
+                'input[type=file].customfile, input[type=file][id^="attachUpload_"]')
+            if file_inputs:
+                file_inputs[0].send_keys("\n".join(attachments))
+                print(f"[post_web] 已上傳附件 {len(attachments)} 個:"
+                      f"{[os.path.basename(a) for a in attachments]}")
+                time.sleep(2)
+                # 填一列後表單會自動長出「空的 required file 列」,會擋發布 → 移除空列。
+                removed = driver.execute_script("""
+                    const empties = [...document.querySelectorAll('input[type=file][id^=attachUpload_]')]
+                        .filter(f => f.files.length === 0);
+                    let n = 0;
+                    for (const f of empties) {
+                        let node = f;
+                        for (let i = 0; i < 6 && node; i++) {
+                            const btn = node.querySelector && node.querySelector('.customfile-remove');
+                            const ins = node.querySelectorAll &&
+                                node.querySelectorAll('input[type=file][id^=attachUpload_]');
+                            if (btn && ins && ins.length === 1) { btn.click(); n++; break; }
+                            node = node.parentElement;
+                        }
+                    }
+                    return n;""")
+                print(f"[post_web] 移除空附件列 {removed} 個")
+                time.sleep(1)
+            else:
+                print("[post_web] [WARN] 找不到附件 file input,跳過附件上傳")
+
+        # 同步顯示至:點「分類」展開,點對應分類選項 li(研習→硏習資訊、其餘→處室公告)。
+        if sync_keyword:
+            driver.execute_script("""
+                for (const b of document.querySelectorAll('button,a,div,span')) {
+                    if ((b.innerText||'').trim() === '分類') { b.click(); return; }
+                }""")
+            time.sleep(1.2)
+            picked = driver.execute_script("""
+                const kw = arguments[0];
+                for (const li of document.querySelectorAll('li')) {
+                    if ((li.innerText||'').trim().includes(kw)) { li.click(); return li.innerText.trim(); }
+                }
+                return null;""", sync_keyword)
+            print(f"[post_web] 同步分類:{picked!r}")
+            time.sleep(0.6)
+
         print("!" * 60)
         print(f"[post_web][發佈] 即將對真實校網發佈公告:{title}")
         print("!" * 60)
@@ -327,13 +406,18 @@ def maybe_post_announcement(driver, extract_dir):
             print(f"[post_web] {extract_dir} 已有已公告標記,跳過。")
             return True
         title, body = summary["title"], summary["body"]
+        attachments = _find_attachments(extract_dir)
+        # 同步分類:存查分類「研習」→「硏習資訊」(站上異體字,用「習資訊」比對);其餘一律「處室公告」。
+        sync_keyword = "習資訊" if summary.get("category") == "研習" else "處室公告"
         print("=" * 60)
-        print("[post_web] 準備發佈公告 → 圖書館/公告文件")
+        print("[post_web] 準備發佈公告 → 圖書館公告")
         print(f"[post_web]   標題: {title}")
+        print(f"[post_web]   存查分類: {summary.get('category')} → 同步「{sync_keyword}」")
+        print(f"[post_web]   附件: {[os.path.basename(a) for a in attachments]}")
         print("=" * 60)
         if not _open_and_login_sssh(driver):
             return False  # 內層 _open_and_login_sssh 失敗時已印具體 STOP banner
-        if not _submit_announcement(driver, title, body):
+        if not _submit_announcement(driver, title, body, attachments, sync_keyword):
             return False  # 內層 _submit_announcement 失敗時已印具體 STOP banner
         _write_posted_marker(extract_dir)
         print(f"[post_web] ✓ 公告已發佈:{title}")

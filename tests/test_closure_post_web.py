@@ -187,7 +187,7 @@ def test_maybe_post_publishes_when_triggered(tmp_path, monkeypatch):
     rec = {}
     monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: rec.__setitem__("login", True) or True)
     monkeypatch.setattr(pw, "_submit_announcement",
-                        lambda drv, t, b: rec.update(title=t, body=b) or True)
+                        lambda drv, t, b, *a: rec.update(title=t, body=b) or True)
     assert pw.maybe_post_announcement(object(), str(d)) is True
     assert rec["login"] is True
     assert rec["title"].startswith("請貴校加強")
@@ -207,7 +207,7 @@ def test_maybe_post_skips_when_already_posted(tmp_path, monkeypatch):
 def test_maybe_post_returns_false_and_no_marker_when_submit_fails(tmp_path, monkeypatch):
     d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
     monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: True)
-    monkeypatch.setattr(pw, "_submit_announcement", lambda drv, t, b: False)
+    monkeypatch.setattr(pw, "_submit_announcement", lambda drv, t, b, *a: False)
     assert pw.maybe_post_announcement(object(), str(d)) is False
     assert not (d / f"{base}已公告.txt").exists()
 
@@ -217,7 +217,32 @@ def test_maybe_post_returns_false_when_login_fails(tmp_path, monkeypatch):
     submit_called = {"v": False}
     monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: False)
     monkeypatch.setattr(pw, "_submit_announcement",
-                        lambda drv, t, b: submit_called.__setitem__("v", True) or True)
+                        lambda drv, t, b, *a: submit_called.__setitem__("v", True) or True)
     assert pw.maybe_post_announcement(object(), str(d)) is False
     assert submit_called["v"] is False
     assert not (d / f"{base}已公告.txt").exists()
+
+
+def test_parse_summary_extracts_category():
+    # NEW_FORMAT 首行 #存查分類:資安 03750402
+    assert _parse_summary_text(NEW_FORMAT)["category"] == "資安"
+    text = "#存查分類:研習 03750401\n##於官網公告\n主旨：標題\n1. 內容。\n"
+    assert _parse_summary_text(text)["category"] == "研習"
+
+
+def test_parse_summary_category_none_when_absent():
+    text = "##於官網公告\n主旨：標題\n1. 內容。\n"
+    assert _parse_summary_text(text)["category"] is None
+
+
+def test_find_attachments_matches_attch_files(tmp_path):
+    import os as _os
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "123_456.pdf").write_text("x", encoding="utf-8")
+    (d / "123_456_ATTCH1.pdf").write_text("x", encoding="utf-8")
+    (d / "123_456_ATTCH2.pdf").write_text("x", encoding="utf-8")
+    (d / "123_456內容.txt").write_text("x", encoding="utf-8")
+    got = pw._find_attachments(str(d))
+    assert len(got) == 2
+    assert all("ATTCH" in _os.path.basename(g) for g in got)
+    assert all(_os.path.isabs(g) for g in got)
