@@ -275,6 +275,15 @@ def _submit_announcement(driver, title, body):
                 person[0].clear(); person[0].send_keys(publisher)
                 print(f"[post_web] 發布者已填:{publisher}")
 
+        # 勾「置頂」(使用者要求):勾後「置頂結束日期/時間」會自動帶預設值(+5天),不需另填。
+        pinned = driver.execute_script("""
+            const c = document.querySelector('[id^="ct-top-"]');
+            if (c && !c.checked) { c.click(); return true; }
+            return c ? c.checked : false;
+        """)
+        print(f"[post_web] 置頂={pinned}")
+        time.sleep(0.5)
+
         print("!" * 60)
         print(f"[post_web][發佈] 即將對真實校網發佈公告:{title}")
         print("!" * 60)
