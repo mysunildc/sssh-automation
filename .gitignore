@@ -24,7 +24,6 @@ final_state.png
 
 # 帳密設定（PIN／校網帳密，嚴禁推上 GitHub）
 env.env
-env_example.env
 id.txt
 
 #目錄
