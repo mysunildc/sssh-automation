@@ -1537,12 +1537,12 @@ def _process_one_pending_closure_doc(driver):
     pin_auto_ok = _handle_pincode_popup(driver)
     if not pin_auto_ok:
         print("[WARN] 自動 pinCode 處理未完成 — 若 popup 仍開著,請手動填 PIN + 按確定")
-        print("[WARN] 程式繼續到 verify 階段(timeout 60s),手動完成後會自動寫標記檔")
+        print("[WARN] 程式繼續到 verify 階段(timeout 30s),手動完成後會自動寫標記檔")
 
     # 確認 doc_no 已從「待結案」清單可見列消失 → 存查成功
-    # timeout 拉長到 60s(原 20s),給使用者足夠手動處理時間
-    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失(等候 60s)...")
-    if not _verify_archive_success_by_listing(driver, doc_no, timeout=60):
+    # timeout 設 30s:pinCode 自動填失敗時,給使用者手動完成 PIN 的時間
+    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失(等候 30s)...")
+    if not _verify_archive_success_by_listing(driver, doc_no, timeout=30):
         print("[WARN] doc_no 仍在頁面,存查可能未完成 — 不寫標記,保持視窗供檢查。")
         return False
 

@@ -36,20 +36,29 @@ _BODY_ITEM_RE = re.compile(r'^\s*\d+\s*[.、]\s*.+$')
 _CATEGORY_RE = re.compile(r'^#\s*存查分類\s*[:：]\s*(\S+)')
 
 
-def _parse_summary_text(text):
-    """解析總結.md 文字，回 {'handling', 'title', 'body'} 或 None。
+def _normalize_cat(s):
+    """正規化分類字串以容忍異體字 — 站上下拉用「研」、總結 spec 用異體字「硏」。
+    把「硏」統一成「研」後再做子字串比對。"""
+    return (s or "").replace("硏", "研").strip()
 
-    - handling（承辦文字）：第一個以 `##` 開頭的行（## 或 ### 皆以 ## 開頭，取最先出現的，
-      即承辦文字那行），去掉開頭所有 # 與前後空白；無此行則為 None。
+
+def _parse_summary_text(text):
+    """解析總結.md 文字，回 {'handling','title','body','category','sync_categories'} 或 None。
+
+    - handling（承辦文字）：第一個以 `##` 開頭的行（取最先出現者，即承辦文字那行），
+      去掉開頭所有 # 與前後空白；無此行則為 None。
     - title（主旨）：第一個 `主旨[:：]` 行冒號後的文字。
     - body（條列摘要）：主旨行之後、檔尾之前，所有 `數字.`／`數字、` 開頭的條列行，
       原樣（strip 過）以換行串接。
+    - category（存查分類）：`#存查分類:` 後的類別名。
+    - sync_categories（校網同步顯示）：`####` 行內容以「+」分隔的分類清單；該行空白 / 缺 → []。
 
     主旨或 body 任一缺 → 回 None（寧缺勿發殘缺公告）。
     """
     handling = None
     title = None
     category = None
+    sync_raw = None
     body_lines = []
     subject_seen = False
 
@@ -60,6 +69,11 @@ def _parse_summary_text(text):
             if mc:
                 category = mc.group(1)
                 continue
+        # 「校網同步顯示」#### 行 — 必須在 ## handling 判斷前先攔（#### 也 startswith ##）。
+        # 後面內容可為空字串（空白＝不選任何同步分類）。
+        if sync_raw is None and line.startswith("####"):
+            sync_raw = line[4:].strip()
+            continue
         if handling is None and line.startswith("##"):
             handling = line.lstrip("#").strip() or None
             continue
@@ -74,8 +88,10 @@ def _parse_summary_text(text):
 
     if title is None or not body_lines:
         return None
+    sync_categories = [c.strip() for c in sync_raw.split("+")] if sync_raw else []
+    sync_categories = [c for c in sync_categories if c]
     return {"handling": handling, "title": title, "body": "\n".join(body_lines),
-            "category": category}
+            "category": category, "sync_categories": sync_categories}
 
 
 def _parse_summary(extract_dir):
@@ -133,17 +149,31 @@ def _already_posted(extract_dir):
     return bool(p) and os.path.isfile(p)
 
 
-def _write_posted_marker(extract_dir):
-    """寫 <主檔名>已公告.txt(內容 ISO8601_已公告)。成功回路徑,否則 None。"""
+def _write_posted_marker(extract_dir, title, board_name, selected_cats):
+    """寫 <主檔名>已公告.txt（三行格式）。成功回路徑,否則 None。
+
+    內容（使用者指定格式）:
+        <ISO8601>_已公告。
+        主旨:<title>
+        公告於:<board_name>。同步顯示於:<selected_cats 以 + 串接;空則「無」>。
+
+    board_name 由發佈當下從頁面實抓（_read_board_name）;selected_cats 為實際點選成功
+    的分類（對不到被略過者不列入,標記才誠實）。本函式只在發佈確認成功後才被呼叫。
+    """
     p = _posted_marker_path(extract_dir)
     if not p:
         print("      [WARN] 找不到公文主檔名,無法寫已公告標記")
         return None
-    content = datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + "_已公告"
+    cats_str = "+".join(selected_cats) if selected_cats else "無"
+    iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    content = (f"{iso}_已公告。\n"
+               f"主旨:{title}\n"
+               f"公告於:{board_name}。同步顯示於:{cats_str}。")
     try:
         with open(p, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"      OK:已寫已公告標記檔 {os.path.basename(p)}(內容: {content!r})")
+        print(f"      OK:已寫已公告標記檔 {os.path.basename(p)}")
+        print(f"          內容:\n{content}")
         return p
     except OSError as e:
         print(f"      [WARN] 寫已公告標記失敗:{type(e).__name__}: {e}")
@@ -230,14 +260,133 @@ def _open_and_login_sssh(driver):
     return True
 
 
-def _submit_announcement(driver, title, body, attachments=None, sync_keyword=None):
+# ── 發布單位 / 板名 helpers ───────────────────────────────────────────────
+# 發布單位:掃所有 <select>,找 option 文字含目標單位者,設 selectedIndex + fire change。
+_SELECT_UNIT_JS = r"""
+var unit = (arguments[0] || '').trim();
+var sels = document.querySelectorAll('select');
+for (var i = 0; i < sels.length; i++) {
+    var sel = sels[i];
+    for (var j = 0; j < sel.options.length; j++) {
+        if ((sel.options[j].text || '').trim().indexOf(unit) !== -1) {
+            sel.selectedIndex = j;
+            sel.dispatchEvent(new Event('change', {bubbles: true}));
+            return {ok: true, text: (sel.options[j].text || '').trim()};
+        }
+    }
+}
+var diag = [];
+for (var k = 0; k < sels.length; k++) {
+    var opts = [];
+    for (var m = 0; m < sels[k].options.length; m++) {
+        opts.push((sels[k].options[m].text || '').trim());
+    }
+    diag.push(opts);
+}
+return {ok: false, diag: diag};
+"""
+
+
+def _select_publish_unit(driver, unit):
+    """選「發布單位」下拉 = unit(子字串比對 option 文字)。
+
+    策略 1:原生 <select> — 掃所有 select 找 option 文字含 unit 者設定之。
+    策略 2(fallback):自訂下拉 — 點開「發布單位」label 區塊的控制項,點文字 == unit 的選項。
+
+    成功 → True;找不到 → 印診斷(各 select 的 options)回 False。
+    """
+    try:
+        r = driver.execute_script(_SELECT_UNIT_JS, unit)
+    except Exception as e:
+        print(f"      [WARN] 選發布單位 JS 例外:{type(e).__name__}: {e}")
+        r = None
+    if r and r.get('ok'):
+        print(f"      OK:發布單位已選「{r.get('text')}」")
+        return True
+    # fallback:自訂下拉(非原生 select)
+    try:
+        opened = driver.execute_script(r"""
+            var lab = null;
+            for (var e of document.querySelectorAll('*')) {
+                if ((e.textContent || '').trim() === '發布單位') { lab = e; break; }
+            }
+            if (!lab) return false;
+            var node = lab.parentElement;
+            for (var d = 0; d < 4 && node; d++) {
+                var ctrl = node.querySelector(
+                    '[role=combobox], .dropdown-toggle, button, [tabindex]');
+                if (ctrl) { ctrl.click(); return true; }
+                node = node.parentElement;
+            }
+            return false;
+        """)
+        if opened:
+            time.sleep(0.8)
+            picked = driver.execute_script(r"""
+                var unit = (arguments[0] || '').trim();
+                for (var e of document.querySelectorAll('li,option,div,span,a')) {
+                    if ((e.textContent || '').trim() === unit) { e.click(); return true; }
+                }
+                return false;
+            """, unit)
+            if picked:
+                print(f"      OK:發布單位(自訂下拉)已選「{unit}」")
+                return True
+    except Exception as e:
+        print(f"      [WARN] 發布單位 fallback 例外:{type(e).__name__}: {e}")
+    print(f"      [ERROR] 找不到發布單位選項「{unit}」;"
+          f"頁面 select options 診斷={(r or {}).get('diag')!r}")
+    return False
+
+
+def _read_board_name(driver, default="圖書館公告"):
+    """從發佈頁實抓「公告於」的板名(模組標題,如『圖書館公告』)。
+
+    使用者要求:此名稱依當時頁面實際狀況抓、不寫死。找不到 → 回 default 並印 WARN。
+    策略:找文字以「告」結尾、含「公告」、長度 <= 8 的最小(葉子)元素。
+    """
+    try:
+        name = driver.execute_script(r"""
+            var els = document.querySelectorAll(
+                'h1,h2,h3,h4,h5,h6,span,div,a,li,strong,b');
+            for (var i = 0; i < els.length; i++) {
+                var t = (els[i].textContent || '').trim();
+                if (t.length === 0 || t.length > 8) continue;
+                if (t.charAt(t.length - 1) !== '告') continue;
+                if (t.indexOf('公告') === -1) continue;
+                var childHit = false;
+                var kids = els[i].querySelectorAll('*');
+                for (var j = 0; j < kids.length; j++) {
+                    var kt = (kids[j].textContent || '').trim();
+                    if (kt.indexOf('公告') !== -1 && kt.length <= 8) { childHit = true; break; }
+                }
+                if (childHit) continue;
+                return t;
+            }
+            return null;
+        """)
+        if name:
+            print(f"      OK:抓到公告板名「{name}」")
+            return name
+    except Exception as e:
+        print(f"      [WARN] 讀板名失敗:{type(e).__name__}: {e}")
+    print(f"      [WARN] 抓不到板名,用預設「{default}」")
+    return default
+
+
+def _submit_announcement(driver, title, body, attachments=None,
+                         sync_categories=None, publish_unit=None):
     """到 圖書館(/nss/s/main/p/library) 圖書館公告模組(先進「模組」編輯模式)點「新增公告」,
-    填標題+內容+發布者、勾置頂、上傳附件、選同步分類,點「發布」。
+    填標題+內容+發布者、選發布單位、勾置頂、上傳附件、選同步分類,點「發布」。
 
     參數:
-        attachments   附件檔案絕對路徑 list(公文 *ATTCH* 檔);None/空則不傳附件。
-        sync_keyword  「同步顯示至」要勾的分類選項關鍵字(如「習資訊」「處室公告」);None 則不選。
-    完成(成功或失敗)都會關掉校網分頁、切回 edoc。成功 → True。
+        attachments      附件檔案絕對路徑 list(公文 *ATTCH* 檔);None/空則不傳附件。
+        sync_categories  「同步顯示至」要點選的分類清單(來自總結 #### 行,如
+                         ['課外活動','硏習資訊']);對不到的略過、能選的照選。
+        publish_unit     「發布單位」下拉要選的單位(env.env sssh_publish_unit);
+                         找不到該選項 → STOP 回 False(不發、不寫標記)。
+    完成(成功或失敗)都會關掉校網分頁、切回 edoc。
+    成功 → 回 {'selected_cats': [...], 'board_name': '...'};失敗 → False。
     """
     from selenium.webdriver.common.by import By
     try:
@@ -297,6 +446,13 @@ def _submit_announcement(driver, title, body, attachments=None, sync_keyword=Non
                 person[0].clear(); person[0].send_keys(publisher)
                 print(f"[post_web] 發布者已填:{publisher}")
 
+        # 發布單位(下拉):選 env.env 的 sssh_publish_unit;找不到該選項 → STOP 不發。
+        if publish_unit:
+            if not _select_publish_unit(driver, publish_unit):
+                _stop_banner(f"發布單位下拉找不到「{publish_unit}」",
+                             "確認 env.env 的 sssh_publish_unit 與站上選項文字一致")
+                return False
+
         # 勾「置頂」(使用者要求):勾後「置頂結束日期/時間」會自動帶預設值(+5天),不需另填。
         pinned = driver.execute_script("""
             const c = document.querySelector('[id^="ct-top-"]');
@@ -347,21 +503,33 @@ def _submit_announcement(driver, title, body, attachments=None, sync_keyword=Non
             else:
                 print("[post_web] [WARN] 找不到附件 file input,跳過附件上傳")
 
-        # 同步顯示至:點「分類」展開,點對應分類選項 li(研習→硏習資訊、其餘→處室公告)。
-        if sync_keyword:
+        # 同步顯示至:依總結 #### 的分類清單,逐一點開「分類」下拉、點 最新消息-<分類>。
+        # 異體字正規化(硏↔研);對不到的分類略過、能選的照選(使用者指定策略)。
+        selected_cats = []
+        for cat in (sync_categories or []):
             driver.execute_script("""
                 for (const b of document.querySelectorAll('button,a,div,span')) {
                     if ((b.innerText||'').trim() === '分類') { b.click(); return; }
                 }""")
-            time.sleep(1.2)
-            picked = driver.execute_script("""
-                const kw = arguments[0];
-                for (const li of document.querySelectorAll('li')) {
-                    if ((li.innerText||'').trim().includes(kw)) { li.click(); return li.innerText.trim(); }
+            time.sleep(1.0)
+            picked = driver.execute_script(r"""
+                var want = arguments[0];   // 已正規化目標(如 研習資訊)
+                function norm(s){ return (s||'').replace(/硏/g,'研').trim(); }
+                for (var li of document.querySelectorAll('li')) {
+                    if (norm(li.innerText).indexOf(want) !== -1) {
+                        li.click(); return li.innerText.trim();
+                    }
                 }
-                return null;""", sync_keyword)
-            print(f"[post_web] 同步分類:{picked!r}")
-            time.sleep(0.6)
+                return null;""", _normalize_cat(cat))
+            if picked:
+                print(f"[post_web] 同步分類點選「{picked}」(對應 {cat})")
+                selected_cats.append(cat)
+            else:
+                print(f"[post_web] [WARN] 同步分類找不到對應「{cat}」的選項,略過")
+            time.sleep(0.5)
+
+        # 「公告於」板名:發佈前從頁面實抓(模組標題,如「圖書館公告」),寫進已公告標記。
+        board_name = _read_board_name(driver)
 
         print("!" * 60)
         print(f"[post_web][發佈] 即將對真實校網發佈公告:{title}")
@@ -382,7 +550,7 @@ def _submit_announcement(driver, title, body, attachments=None, sync_keyword=Non
             _stop_banner("發布後表單仍在,可能必填欄未填或被擋", "實機檢查表單必填欄(發布單位/發布者/日期)")
             return False
         print(f"[post_web] ✓ 已送出發布:{title}")
-        return True
+        return {"selected_cats": selected_cats, "board_name": board_name}
     except Exception as e:
         _stop_banner(f"_submit_announcement 例外:{type(e).__name__}: {e}")
         return False
@@ -395,9 +563,11 @@ def maybe_post_announcement(driver, extract_dir):
 
     - 觸發判定不符(總結承辦文字不含「於官網公告」)→ 回 False(skipped,非錯誤)
     - 已有「已公告」標記 → 回 True(skip)
-    - 登入或發佈失敗 → 印 STOP banner 回 False(不 raise,絕不影響已完成的存查歸檔)
-    - 成功 → 寫已公告標記、回 True
+    - env.env 缺 sssh_publish_unit / 登入 / 發佈失敗 → 印 STOP banner 回 False
+      (不 raise,絕不影響已完成的存查歸檔)
+    - 成功 → 寫已公告標記(三行格式,含板名 + 實際選到的分類)、回 True
     """
+    from taipeion_login_selenium import _read_config
     try:
         summary = _parse_summary(extract_dir)
         if not _should_post(summary):
@@ -406,20 +576,28 @@ def maybe_post_announcement(driver, extract_dir):
             print(f"[post_web] {extract_dir} 已有已公告標記,跳過。")
             return True
         title, body = summary["title"], summary["body"]
+        sync_categories = summary.get("sync_categories") or []
         attachments = _find_attachments(extract_dir)
-        # 同步分類:存查分類「研習」→「硏習資訊」(站上異體字,用「習資訊」比對);其餘一律「處室公告」。
-        sync_keyword = "習資訊" if summary.get("category") == "研習" else "處室公告"
+        publish_unit = _read_config("sssh_publish_unit")
+        if not publish_unit:
+            _stop_banner("env.env 缺 sssh_publish_unit",
+                         "在 env.env 填 sssh_publish_unit=系管師群組(或你的單位)")
+            return False
         print("=" * 60)
         print("[post_web] 準備發佈公告 → 圖書館公告")
         print(f"[post_web]   標題: {title}")
-        print(f"[post_web]   存查分類: {summary.get('category')} → 同步「{sync_keyword}」")
+        print(f"[post_web]   發布單位: {publish_unit}")
+        print(f"[post_web]   同步分類(####): {sync_categories}")
         print(f"[post_web]   附件: {[os.path.basename(a) for a in attachments]}")
         print("=" * 60)
         if not _open_and_login_sssh(driver):
-            return False  # 內層 _open_and_login_sssh 失敗時已印具體 STOP banner
-        if not _submit_announcement(driver, title, body, attachments, sync_keyword):
-            return False  # 內層 _submit_announcement 失敗時已印具體 STOP banner
-        _write_posted_marker(extract_dir)
+            return False  # 內層失敗已印具體 STOP banner
+        result = _submit_announcement(driver, title, body, attachments,
+                                      sync_categories, publish_unit)
+        if not result:
+            return False  # 內層失敗已印具體 STOP banner
+        _write_posted_marker(extract_dir, title,
+                             result["board_name"], result["selected_cats"])
         print(f"[post_web] ✓ 公告已發佈:{title}")
         return True
     except Exception as e:

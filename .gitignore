@@ -28,8 +28,10 @@ id.txt
 
 #目錄
 document_download/*
-document_download_labeled/*
 document_download_closure/*
+#強制 Git 不要忽略 .gitkeep 檔案（這樣目錄就會被保留）
+!/document_download/.gitkeep
+!/document_download_closure/.gitkeep
 
 # doc_classifier
 doc_classifier/training_data/*
