@@ -14,6 +14,7 @@ import glob
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 from datetime import datetime
@@ -1084,6 +1085,40 @@ def _close_doc_viewer_window(driver):
         return False
 
 
+def _force_rmtree(path, attempts=3):
+    """Windows-robust 版 shutil.rmtree。
+
+    為何需要:KdApp 匯出的 zip 解壓後,內層「來文」殼層目錄常帶 **read-only**
+    屬性。Windows 上 shutil.rmtree 砍 read-only 目錄/檔會拋 PermissionError
+    (WinError 5 存取被拒) — 實測 MWAA1156005762 的承辦中目錄就因此整包刪不掉。
+
+    對策:onexc handler 先清掉 read-only(os.chmod S_IWRITE)再重試該刪除動作;
+    被其他程序短暫鎖住(WinError 32)則整體重試 attempts 次。
+
+    成功 → True;重試到上限仍失敗 → 印 x 回 False。
+    """
+    def _onexc(func, p, exc):
+        # rmtree 內某個 unlink/rmdir 失敗時被呼叫:清掉 read-only 再重試該動作。
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except OSError:
+            pass
+        func(p)
+
+    last_err = None
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(path, onexc=_onexc)
+            print(f"      OK:已刪除承辦中目錄 {path}")
+            return True
+        except OSError as e:
+            last_err = e
+            time.sleep(0.5)
+    print(f"      x  刪除承辦中目錄失敗(重試 {attempts} 次):"
+          f"{type(last_err).__name__}: {last_err}")
+    return False
+
+
 def _delete_pending_archive(closure_dir):
     """刪除 document_download/<同公文文號>/ 目錄。
 
@@ -1094,7 +1129,8 @@ def _delete_pending_archive(closure_dir):
     承辦中目錄存在且 *總結*.md 已成功複製;否則不該呼叫本函式(會誤刪
     尚未歸檔的內容)。
 
-    回 True 表示已刪除/不存在無需刪除;False 表示刪除失敗(rmtree 例外)。
+    刪除走 _force_rmtree(處理 read-only「來文」殼層,見其 docstring)。
+    回 True 表示已刪除/不存在無需刪除;False 表示刪除失敗。
     """
     from pending_doc_handler import DOWNLOAD_DIR as _PENDING_DIR
 
@@ -1103,13 +1139,7 @@ def _delete_pending_archive(closure_dir):
     if not os.path.isdir(src_dir):
         print(f"      [INFO] 承辦中目錄 {src_dir} 不存在,無需刪除")
         return True
-    try:
-        shutil.rmtree(src_dir)
-        print(f"      OK:已刪除承辦中目錄 {src_dir}")
-        return True
-    except OSError as e:
-        print(f"      x  刪除承辦中目錄失敗:{type(e).__name__}: {e}")
-        return False
+    return _force_rmtree(src_dir)
 
 
 def _switch_to_doc_viewer_window(driver):
