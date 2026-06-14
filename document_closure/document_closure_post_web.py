@@ -9,7 +9,7 @@ document_closure_post_web.py
   1) 結案存查流程中自動串接（document_closure._process_one_pending_closure_doc）：
        maybe_post_announcement(driver, extract_dir)
   2) 單獨執行（只對指定的「一個」公文目錄）：
-       C:\\Python314\\python.exe document_closure/document_closure_post_web.py <公文目錄>
+       py document_closure/document_closure_post_web.py <公文目錄>
 """
 
 import glob

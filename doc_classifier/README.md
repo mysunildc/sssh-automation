@@ -14,16 +14,16 @@
 
 ```powershell
 # 對單一公文目錄分類
-C:\Python314\python.exe -m doc_classifier.classifier document_download\MW999
+py -m doc_classifier.classifier document_download\MW999
 
 # 掃 document_download/MW*/(預設)
-C:\Python314\python.exe -m doc_classifier.classifier
+py -m doc_classifier.classifier
 
 # 已分類過的也強制重跑
-C:\Python314\python.exe -m doc_classifier.classifier --force
+py -m doc_classifier.classifier --force
 
 # 只跑 sync,不分類
-C:\Python314\python.exe -m doc_classifier.collect_training
+py -m doc_classifier.collect_training
 ```
 
 ## 結構

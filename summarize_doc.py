@@ -11,9 +11,9 @@ summarize_doc.py
 呼叫方式:
 1) 從 pending_doc_handler 鏈式呼叫: `summarize_extracted(extract_dir)`
 2) 獨立執行(預設掃 document_download/ 下所有 MW* 子目錄):
-     `C:\\Python314\\python.exe summarize_doc.py`
+     `py summarize_doc.py`
 3) 獨立執行(指定單一公文目錄):
-     `C:\\Python314\\python.exe summarize_doc.py document_download\\MWAA1156005008`
+     `py summarize_doc.py document_download\\MWAA1156005008`
 
 LLM backend (依序嘗試,任一可用即用):
 - gemini (走使用者既有 Google 訂閱 OAuth,模型用 CLI 預設 = 當期最新最佳)

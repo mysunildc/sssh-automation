@@ -6,7 +6,7 @@ document_system.py
 1) 從 main.py 串接：click_document_card 回 True 後 main() 直接呼叫
      process_document_system(driver)
 2) 單獨執行（測試用，跳過登入流程）：
-     C:\\Python314\\python.exe document_system.py
+     py document_system.py
    會用同一個 Selenium profile 開 Chrome、直接導航到 edoc 首頁；session 過期就
    提示去跑 main.py 重登。
 

@@ -81,7 +81,7 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 ## 環境需求
 
 - Windows 10(**必須在螢幕未鎖定狀態執行** — Windows 鎖屏會阻擋 HiCOS 讀卡)
-- Python 3.14(路徑:`C:\Python314\`)
+- Python 3.14+（以 Windows `py` 啟動器執行；本機裝在 `C:\Python314\`）
 - Google Chrome
 - HiCOS 自然人憑證跨平台元件 + 讀卡機 + 卡片
 - 公文系統 KdApp 本地元件(已隨 edoc 安裝;監聽 `http://127.0.0.1:16888`)
@@ -89,7 +89,7 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 ### 安裝相依套件
 
 ```powershell
-C:\Python314\python.exe -m pip install pillow pyautogui selenium pywin32 pyyaml
+py -m pip install pillow pyautogui selenium pywin32 pyyaml
 ```
 
 - `pillow` / `pyautogui`:備援像素版登入 (FEATURES[1]) 用
@@ -122,9 +122,9 @@ sssh_publish_unit=系管師群組
 ## 執行方式
 
 ```powershell
-C:\Python314\python.exe main.py          # 預設跑 FEATURES[0](Selenium + 點公文 + 公文系統處理)
-C:\Python314\python.exe main.py 2        # 跑 FEATURES[1](pyautogui 像素版備援,只到登入)
-C:\Python314\python.exe main.py 3        # 跑 FEATURES[2](Selenium + 點公文 + 結案存查)
+py main.py          # 預設跑 FEATURES[0](Selenium + 點公文 + 公文系統處理)
+py main.py 2        # 跑 FEATURES[1](pyautogui 像素版備援,只到登入)
+py main.py 3        # 跑 FEATURES[2](Selenium + 點公文 + 結案存查)
 ```
 
 執行前會 `taskkill /F /IM chrome.exe` 清掉所有 Chrome(含使用者個人 Chrome),跑完即退出回 shell。
@@ -134,8 +134,8 @@ C:\Python314\python.exe main.py 3        # 跑 FEATURES[2](Selenium + 點公文 
 各階段也可獨立跑,在 Chrome 已就位的狀態下從中段開始(`session 過期會提示去跑 main.py 重登`):
 
 ```powershell
-C:\Python314\python.exe document_system.py        # 從 edoc 公文系統入口往下跑
-C:\Python314\python.exe pending_doc_handler.py    # 同 document_system 路徑,只是訊號燈擺在閱覽器分頁
+py document_system.py        # 從 edoc 公文系統入口往下跑
+py pending_doc_handler.py    # 同 document_system 路徑,只是訊號燈擺在閱覽器分頁
 ```
 
 ## 功能說明
@@ -243,7 +243,7 @@ FEATURES = [
 也可單獨執行各模組（session 過期會提示去跑 main.py 重登）:
 
 ```powershell
-C:\Python314\python.exe main.py   # 從0開始全流程(打開瀏覽器->TaipeiON->...)
-C:\Python314\python.exe document_system.py                # 公文系統全流程
-C:\Python314\python.exe document_closure/document_closure.py     # 結案存查
+py main.py   # 從0開始全流程(打開瀏覽器->TaipeiON->...)
+py document_system.py                # 公文系統全流程
+py document_closure/document_closure.py     # 結案存查
 ```

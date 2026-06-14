@@ -2,10 +2,9 @@
 main.py
 自動化主程式 — 統一呼叫各功能模組的入口。
 
-執行方式：
-    C:\\Python314\\python.exe main.py            # 預設跑 FEATURES[0]（Selenium 版）
-    C:\\Python314\\python.exe main.py 2          # 跑 FEATURES[1]（pyautogui 版）
-    C:\\Python314\\python.exe c:\\Users\\ldc\\Documents\\GitHub\\sssh-automation\\main.py
+執行方式（在專案根目錄）：
+    py main.py            # 預設跑 FEATURES[0]（Selenium 版）
+    py main.py 2          # 跑 FEATURES[1]（pyautogui 版）
 
 執行後跑指定 FEATURE，結束即回到原本的 PowerShell / CMD 視窗（不再進入選單迴圈）。
 """

@@ -3,7 +3,7 @@ taipeion_login.py
 臺北市單一帳號認證平台（TAIPEION）自然人憑證登入模組。
 
 直接執行：
-    C:\\Python314\\python.exe taipeion_login.py
+    py taipeion_login.py
 
 從其他腳本呼叫：
     from taipeion_login import login_taipeion

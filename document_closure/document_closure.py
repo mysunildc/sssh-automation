@@ -6,7 +6,7 @@ document_closure.py
 1) 從 main.py 串接（FEATURES[2]，python main.py 3）：
      process_document_closure(driver)
 2) 單獨執行（跳過登入，直接開 Chrome 到 edoc）：
-     C:\\Python314\\python.exe document_closure/document_closure.py
+     py document_closure/document_closure.py
    session 過期時會提示跑 main.py 重新登入。
 """
 

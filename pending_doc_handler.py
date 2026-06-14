@@ -12,7 +12,7 @@ pending_doc_handler.py
 呼叫方式：
 1) 從 document_system.pending_doc 串接（main.py 主流程會走到）
 2) 單獨執行階段測試：
-     C:\\Python314\\python.exe pending_doc_handler.py
+     py pending_doc_handler.py
    會跑 document_system standalone 同樣的路徑（開 edoc → cascade →
    pending_doc）,跑完後 chain 自動觸發本模組。session 過期就提示
    去跑 main.py 重登。

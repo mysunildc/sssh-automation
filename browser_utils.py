@@ -9,7 +9,7 @@ Chrome 視窗操作共用工具庫。
   4. 高階工具  — 開啟新 Chrome 視窗並等待頁面載入、像素顏色搜尋
 
 相依套件（需先安裝）：
-    C:\\Python314\\python.exe -m pip install pillow pyautogui
+    py -m pip install pillow pyautogui
 
 注意：所有座標均為「螢幕絕對座標」（DPI 縮放 100% 假設），
       若 Windows 顯示縮放非 100%，截圖與點擊位置可能偏移。
@@ -17,6 +17,8 @@ Chrome 視窗操作共用工具庫。
 
 import ctypes
 import ctypes.wintypes
+import os
+import shutil
 import subprocess
 import time
 
@@ -38,7 +40,53 @@ SWP_NOSIZE     = 0x0001   # SetWindowPos：不改變視窗大小
 HWND_TOPMOST   = -1       # 設為永遠置頂
 HWND_NOTOPMOST = -2       # 取消永遠置頂（恢復正常層級）
 
-CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+def _find_chrome_exe():
+    """自動偵測本機 Chrome 執行檔路徑，讓專案移機/換使用者也能用。
+
+    依序嘗試，第一個實際存在的檔案就用；全部找不到時回傳 None
+    （啟動 Chrome 時才丟清楚的錯誤，import 階段不爆）：
+      1. 環境變數 SSSH_CHROME_EXE（保險用：使用者可手動指定絕對路徑，最優先）
+      2. Windows registry App Paths\\chrome.exe（HKLM → HKCU）
+      3. 已知安裝位置：%ProgramFiles% / %ProgramFiles(x86)% / %LOCALAPPDATA%
+      4. PATH（shutil.which）
+    """
+    # 1) 環境變數覆寫
+    override = os.environ.get("SSSH_CHROME_EXE")
+    if override and os.path.isfile(override):
+        return override
+
+    # 2) Windows registry App Paths（最可靠）
+    try:
+        import winreg
+        sub_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, sub_key) as k:
+                    path, _ = winreg.QueryValueEx(k, None)  # (default) 值即完整路徑
+                if path and os.path.isfile(path):
+                    return path
+            except OSError:
+                continue
+    except ImportError:
+        pass  # 非 Windows
+
+    # 3) 已知安裝位置（64-bit / 32-bit / 使用者層級安裝）
+    for base in (
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ):
+        if not base:
+            continue
+        cand = os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")
+        if os.path.isfile(cand):
+            return cand
+
+    # 4) PATH
+    return shutil.which("chrome") or shutil.which("chrome.exe")
+
+
+CHROME_EXE = _find_chrome_exe()
 
 
 # ── 視窗列舉 ──────────────────────────────────────────────────────────────────
@@ -193,6 +241,11 @@ def launch_chrome_and_wait(profile, url, title_keywords, timeout=30):
     回傳：
         (hwnd, left, top, width, height)  目標視窗資訊；超時或失敗回傳 None。
     """
+    if not CHROME_EXE:
+        raise FileNotFoundError(
+            "找不到 Chrome 執行檔。請安裝 Google Chrome，或設定環境變數 "
+            "SSSH_CHROME_EXE 指向 chrome.exe 的絕對路徑。"
+        )
     existing = get_all_chrome_windows()
     subprocess.Popen([
         CHROME_EXE,

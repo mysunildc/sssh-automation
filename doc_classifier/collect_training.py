@@ -7,7 +7,7 @@
 - 來源較新就覆蓋(以 mtime 為準)
 
 可獨立執行:
-    C:\\Python314\\python.exe doc_classifier\\collect_training.py
+    py doc_classifier\\collect_training.py
 """
 import re
 import shutil
