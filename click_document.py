@@ -41,6 +41,22 @@ DOCUMENT_XPATHS = [
 # 「公文(學校)」label 元素本身（用來定位後再從附近找數字）。
 DOCUMENT_LABEL_XPATH = "//*[normalize-space()='公文(學校)']"
 
+# edoc 站內「二次憑證登入」頁（https://edoc.gov.taipei/tcqb/index.jsp）的元素。
+# 從 TAIPEION 點「公文(學校)」進來後，edoc 不吃 TAIPEION 的 session，會再要一次
+# 自然人憑證 PinCode；沒過這關就停在 index.jsp，下游 process_document_system 會
+# 在登入頁上空轉（每個 sidebar label 等 10s 後 [WARN] 找不到，最後誤判「無公文待處理」）。
+EDOC_PIN_INPUT_XPATHS = [
+    "//input[@id='pinCode']",
+    "//input[@name='pinCode']",
+    "//input[contains(@placeholder, 'pinCode')]",
+    "//input[@type='password' and contains(@placeholder, 'PIN')]",
+]
+EDOC_PIN_LOGIN_XPATHS = [
+    "//button[@id='pinLogin']",
+    "//*[@id='pinLogin']",
+    "//button[normalize-space()='登入']",
+]
+
 
 def _ensure_driver(driver):
     """若 driver=None，自動呼叫 login_taipeion_selenium 重新登入取得 driver。
@@ -155,6 +171,103 @@ def _click_document_card(driver, timeout=8):
     return False
 
 
+def _find_visible(driver, xpaths, timeout=0):
+    """依序試 xpaths，回傳第一個「可見」的元素；都沒有則 None。timeout>0 時對第一輪等待。"""
+    deadline = time.time() + timeout
+    while True:
+        for xp in xpaths:
+            try:
+                for el in driver.find_elements(By.XPATH, xp):
+                    if el.is_displayed():
+                        return el
+            except Exception:
+                continue
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def edoc_pin_login(driver, wait_form=10, wait_nav=40):
+    """edoc 站內二次憑證登入：停在 index.jsp 時自動填 PIN（env.env）並按「登入」。
+
+    不在登入頁（找不到可見 pinCode 欄位）→ 視為已登入，直接回 True（冪等，可重複呼叫）。
+
+    回傳 True 表示「已在公文系統內」；False 表示仍卡在登入頁（PIN 讀不到 / autofill
+    干擾 / 送出後沒跳轉），呼叫端應停下，不要讓下游在登入頁上空轉。
+    """
+    pin_el = _find_visible(driver, EDOC_PIN_INPUT_XPATHS, timeout=wait_form)
+    if pin_el is None:
+        try:
+            cur = driver.current_url
+        except Exception:
+            cur = "?"
+        if "index.jsp" in cur:
+            print(f"[ERROR] 停在 edoc 登入頁 {cur} 但找不到 pinCode 欄位，無法自動登入")
+            return False
+        print("      OK：edoc 未要求二次憑證登入（已在系統內）")
+        return True
+
+    print("[edoc_pin_login] edoc 要求二次憑證登入，自動填入 PIN（從 env.env 讀）...")
+    from taipeion_login_selenium import _read_pin
+    pin = _read_pin()
+    if not pin:
+        print("[ERROR] env.env 讀不到 pin=，無法自動登入 edoc（請手動輸入 PIN 並按登入）")
+        return False
+
+    try:
+        pin_el.click()
+        pin_el.clear()
+        pin_el.send_keys(pin)
+    except Exception as e:
+        print(f"[ERROR] 填 PIN 失敗：{type(e).__name__}: {e}")
+        return False
+
+    # 驗證欄位內容 —— Chrome profile 內若殘留已存密碼，autofill 會在 focus 時蓋掉
+    # 欄位值（曾踩過：公告失敗就是這個原因）。值不對就不送出，避免鎖卡。
+    time.sleep(0.3)
+    try:
+        got = pin_el.get_attribute("value") or ""
+    except Exception:
+        got = ""
+    if got != pin:
+        print(f"[ERROR] PIN 欄位內容與預期不符（長度 {len(got)}，疑似 autofill 干擾），中止送出避免錯誤 PIN 鎖卡")
+        return False
+    print(f"      OK：PIN 已填入並驗證（長度 {len(got)}）")
+
+    btn = _find_visible(driver, EDOC_PIN_LOGIN_XPATHS, timeout=3)
+    if btn is None:
+        print("[ERROR] 找不到 edoc 登入頁的「登入」按鈕")
+        return False
+    try:
+        before = driver.current_url
+    except Exception:
+        before = ""
+    try:
+        btn.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", btn)
+    print("      OK：已點『登入』，等待跳轉（憑證簽章需數秒）...")
+
+    deadline = time.time() + wait_nav
+    while time.time() < deadline:
+        time.sleep(1)
+        try:
+            cur = driver.current_url
+        except Exception:
+            continue  # 導航中讀 URL 可能短暫失敗
+        if cur != before and "index.jsp" not in cur:
+            print(f"      OK：edoc 登入成功 → {cur}")
+            time.sleep(1)  # 讓首頁 sidebar 渲染完再交給下游
+            return True
+
+    try:
+        cur = driver.current_url
+    except Exception:
+        cur = "?"
+    print(f"[ERROR] 點登入後 {wait_nav}s 內未離開登入頁（仍在 {cur}）— PIN 可能錯誤或簽章元件未回應")
+    return False
+
+
 def click_document(driver):
     """『公文(學校)』方塊點選之後的後續工作。
 
@@ -187,6 +300,10 @@ def click_document(driver):
     except Exception as e:
         print(f"[click_document] 讀狀態失敗：{type(e).__name__}: {e}")
 
+    # edoc 不吃 TAIPEION 的 session，進站會再要一次自然人憑證 PinCode（index.jsp）。
+    # 沒過這關就直接往下走，process_document_system 會在登入頁上空轉並誤判「無公文待處理」。
+    pin_ok = edoc_pin_login(driver)
+
     # dump 瀏覽器 console log — 簽章元件 (TCGServiSign on https://127.0.0.1:5642x)
     # 若被 Chrome PNA / mixed content / CORS 擋會在 console 印錯誤；存檔下次方便比對。
     # 需要 Selenium options 內有 set_capability("goog:loggingPrefs", {"browser":"ALL"})
@@ -201,6 +318,9 @@ def click_document(driver):
         print(f"[click_document] dump console log 失敗：{type(e).__name__}: {e}")
 
     # TODO: 點選之後的後續工作在此擴充
+    if not pin_ok:
+        print("[ERROR] edoc 二次憑證登入未完成，不往下跑公文流程（避免在登入頁上空轉誤判）。")
+        return False
     print("[完成] 公文後續工作流程結束。")
     return True
 
