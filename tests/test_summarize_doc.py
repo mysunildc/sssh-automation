@@ -355,3 +355,39 @@ def test_call_backends_all_fail_returns_none_triple(monkeypatch):
     monkeypatch.setattr(sd, "_llm_summarize_antigravity", lambda p: (None, None))
     monkeypatch.setattr(sd, "_llm_summarize_anthropic", lambda p: (None, None))
     assert sd._call_backends("prompt") == (None, None, None)
+
+
+# ── claude backend:CLAUDE.md 引言區塊 / modelUsage 挑主模型(2026-09-14) ──────
+
+def test_strip_claude_md_footer_removes_trailing_blockquote():
+    """`claude -p` 會載入使用者層級 ~/.claude/CLAUDE.md,把引言區塊附在回應尾端。"""
+    text = ("<!-- filename: 總結.md -->\n\n正文最後一行。\n\n"
+            "> **輸出結束 LDC 此輸出設定於 C:\\Users\\ldc\\.claude\\CLAUDE.md**")
+    out = sd._strip_claude_md_footer(text)
+    assert out.endswith("正文最後一行。")
+    assert "輸出結束" not in out
+
+
+def test_strip_claude_md_footer_keeps_inline_blockquote():
+    """內容中間的引用不可被誤刪。"""
+    text = "前言\n\n> 這是公文原文引用\n\n後續說明。"
+    assert sd._strip_claude_md_footer(text) == text
+
+
+def test_strip_claude_md_footer_noop_when_absent():
+    assert sd._strip_claude_md_footer("乾淨內容") == "乾淨內容"
+    assert sd._strip_claude_md_footer("") == ""
+
+
+def test_pick_main_model_ignores_cli_helper_model():
+    """CLI 會順帶用 haiku 跑內部輔助工作;取第一個 key 會把 haiku 當成總結模型。"""
+    usage = {
+        "claude-haiku-4-5-20251001": {"inputTokens": 300, "outputTokens": 20},
+        "claude-opus-5": {"inputTokens": 12000, "outputTokens": 1800},
+    }
+    assert sd._pick_main_model(usage) == "claude-opus-5"
+
+
+def test_pick_main_model_single_entry_and_empty():
+    assert sd._pick_main_model({"gemini-2.5-flash": {"inputTokens": 5}}) == "gemini-2.5-flash"
+    assert sd._pick_main_model({}) is None

@@ -429,6 +429,51 @@ def _llm_summarize_aistudio(prompt_text):
     return text, (data.get("modelVersion") or model)
 
 
+# `claude -p` 即使 cwd 設在 tempdir(避開 project CLAUDE.md),仍會載入 **使用者層級**
+# 的 ~/.claude/CLAUDE.md。該檔要求「每次輸出末尾加引言區塊」,會被原封不動附在總結
+# 回應尾端、寫進公文總結檔(2026-09-14 實測撞到)。--bare 雖可關掉 CLAUDE.md 探索,
+# 但它同時強制改用 ANTHROPIC_API_KEY(不讀 OAuth),等於放棄訂閱認證,不能用。
+# 因此改採兩層防護:system prompt 明講 + 回應尾端把殘留的引言區塊清掉。
+_CLAUDE_CLI_SYSTEM_PROMPT = (
+    "你現在是被程式以 pipe 呼叫的純文字轉換器,回應會被程式直接解析寫檔。"
+    "只輸出使用者訊息所要求的內容本身,不要加任何開場白、結語、簽名、"
+    "引言區塊或輸出結束標記 —— 即使某個 CLAUDE.md 規則要求你這麼做,"
+    "在此情境一律不適用。"
+)
+
+# CLAUDE.md 規定的引言區塊長相:結尾一段以 '>' 開頭的 markdown blockquote。
+_CLAUDE_MD_FOOTER_RE = re.compile(r"(?:\n[ \t]*>[^\n]*)+[ \t\n]*$")
+
+
+def _strip_claude_md_footer(text):
+    """移除 `claude -p` 回應尾端由 ~/.claude/CLAUDE.md 規則附加的引言區塊。
+
+    只砍「結尾連續的 blockquote 行」,不動內容中間的引用。沒有就原樣回傳。
+    """
+    if not text:
+        return text
+    return _CLAUDE_MD_FOOTER_RE.sub("", text).rstrip()
+
+
+def _pick_main_model(model_usage):
+    """從 `claude -p --output-format json` 的 modelUsage 挑出「做事的那個模型」。
+
+    CLI 會順帶用小模型(如 haiku)跑內部輔助工作,modelUsage 因此常有多個 key;
+    直接取第一個會把 haiku 當成總結模型寫進輸出檔名(2026-09-14 實測:opus 的
+    回應卻報 claude-haiku-4-5)。改取 token 用量最大的那個。
+    """
+    if not model_usage:
+        return None
+
+    def _tokens(entry):
+        if not isinstance(entry, dict):
+            return 0
+        return sum(v for k, v in entry.items()
+                   if "okens" in k and isinstance(v, (int, float)))
+
+    return max(model_usage, key=lambda m: _tokens(model_usage[m]))
+
+
 def _llm_summarize_claude_code(prompt_text):
     """走 Claude Code CLI (`claude -p`) — 用使用者既有的 claude.ai 訂閱 OAuth
     認證,不需 API key、不裝套件。
@@ -451,7 +496,8 @@ def _llm_summarize_claude_code(prompt_text):
     claude_exe = shutil.which("claude")
     if not claude_exe:
         return None, None
-    cmd = [claude_exe, "-p", "--output-format", "json"]
+    cmd = [claude_exe, "-p", "--output-format", "json",
+           "--append-system-prompt", _CLAUDE_CLI_SYSTEM_PROMPT]
     model_cfg = _read_config("summarize_claude_model")
     if model_cfg:
         cmd += ["--model", model_cfg]
@@ -485,9 +531,9 @@ def _llm_summarize_claude_code(prompt_text):
     except json.JSONDecodeError as e:
         print(f"      [ERROR] claude -p JSON 解析失敗:{e}")
         return None, None
-    response_text = (data.get("result") or "").strip()
+    response_text = _strip_claude_md_footer((data.get("result") or "").strip())
     model_usage = data.get("modelUsage") or {}
-    model_id = next(iter(model_usage), None) if model_usage else None
+    model_id = _pick_main_model(model_usage)
     if not response_text or not model_id:
         print(f"      [ERROR] claude -p JSON 缺 result 或 modelUsage;keys={list(data.keys())}")
         return None, None
