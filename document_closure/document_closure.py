@@ -1158,34 +1158,118 @@ def _delete_pending_archive(closure_dir):
     return _force_rmtree(src_dir)
 
 
-def _switch_to_doc_viewer_window(driver):
-    """點待結案公文後，新分頁(公文閱覽器)會開啟，把 driver focus 切到非主 window。
+def _doc_no_to_sno(doc_no):
+    """公文文號 → 公文閱覽器 URL 的 doSno 流水號。
 
-    流程同 pending_doc_handler.handle_opened_document 的開頭：
-    1. 讀 window_handles，>=2 才繼續
-    2. 切到非 current 的那個 handle(預設只會有 1 個新分頁)
+    實測對應:`MWAA1156009372` 的閱覽器 URL 是 `...?app=editor&doSno=1156009372...`
+    —— 即文號去掉英文前綴後的數字部分。抽不出數字回 None。
+    """
+    if not doc_no:
+        return None
+    m = re.search(r"(\d{6,})", str(doc_no))
+    return m.group(1) if m else None
 
-    成功 → driver focus 留在新公文閱覽器分頁，回 True
-    失敗(只有 1 個 window / 切換例外) → 回 False
+
+def _close_stale_viewer_windows(driver):
+    """關掉主分頁以外所有殘留分頁(上一輪沒關乾淨的公文閱覽器、逾時警告頁…)。
+
+    為何需要(2026-09-16 實機事故):第 2 輪點的是 MWAA1156009143,但 driver 切到的
+    是上一輪殘留的 `doSno=1156009372` 分頁,於是在「別件公文」上讀到「如擬」並下載,
+    把 9372 的內容當成 9143 的結案資料(後續讀不到 9143 結案目錄才中止)。
+    點公文前先清乾淨,讓「非主分頁」只會有剛點開的那一個。
+
+    回傳關掉的分頁數。
     """
     try:
         main_handle = driver.current_window_handle
-        handles = driver.window_handles
+        handles = list(driver.window_handles)
     except Exception as e:
-        print(f"[document_closure] 讀 window_handles 失敗：{type(e).__name__}: {e}")
+        print(f"      [WARN] 讀 window_handles 失敗,略過殘留分頁清理:{type(e).__name__}: {e}")
+        return 0
+
+    closed = 0
+    for h in handles:
+        if h == main_handle:
+            continue
+        try:
+            driver.switch_to.window(h)
+            print(f"      清掉殘留分頁:{driver.current_url[:90]}")
+            driver.close()
+            closed += 1
+        except Exception as e:
+            print(f"      [WARN] 關殘留分頁失敗:{type(e).__name__}: {e}")
+    try:
+        driver.switch_to.window(main_handle)
+    except Exception as e:
+        print(f"      [WARN] 切回主分頁失敗:{type(e).__name__}: {e}")
+    if closed:
+        print(f"      OK:已清掉 {closed} 個殘留分頁")
+    return closed
+
+
+def _switch_to_doc_viewer_window(driver, expect_doc_no=None, timeout=10):
+    """點待結案公文後，新分頁(公文閱覽器)會開啟，把 driver focus 切到該分頁。
+
+    **必須確認切到的是「剛點的那件公文」**:傳入 expect_doc_no 時,只接受 URL 帶
+    `doSno=<該文號的數字部分>` 的分頁;找不到就回 False 並印出所有候選分頁 URL,
+    **不拿殘留分頁硬幹** —— 那會下載到別件公文的內容,拿去給這件公文結案(2026-09-16
+    實機踩過,見 _close_stale_viewer_windows 的說明)。
+
+    expect_doc_no=None(或文號抽不出數字)時退回舊行為:切到任一非主分頁。
+
+    成功 → driver focus 留在該公文閱覽器分頁，回 True;失敗 → 切回主分頁後回 False。
+    """
+    try:
+        main_handle = driver.current_window_handle
+    except Exception as e:
+        print(f"[document_closure] 讀 current_window_handle 失敗：{type(e).__name__}: {e}")
         return False
 
-    if len(handles) <= 1:
-        print("[document_closure] 只有 1 個 window，沒偵測到公文閱覽器新分頁。")
-        return False
+    want_sno = _doc_no_to_sno(expect_doc_no)
+    deadline = time.time() + timeout
+    seen = {}
+    target = None
 
-    new_handle = next((h for h in handles if h != main_handle), None)
-    if new_handle is None:
-        print("[document_closure] 沒找到非主 window 的 handle。")
+    while True:
+        try:
+            handles = [h for h in driver.window_handles if h != main_handle]
+        except Exception as e:
+            print(f"[document_closure] 讀 window_handles 失敗：{type(e).__name__}: {e}")
+            return False
+
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                url = driver.current_url or ""
+            except Exception:
+                continue
+            seen[h] = url
+            if want_sno is None:
+                target = h
+                break
+            if f"doSno={want_sno}" in url:
+                target = h
+                break
+        if target or time.time() >= deadline:
+            break
+        time.sleep(1)  # 閱覽器分頁還在開,等一下再掃
+
+    if target is None:
+        if not seen:
+            print("[document_closure] 沒偵測到公文閱覽器新分頁。")
+        else:
+            print(f"[document_closure] [ERROR] 找不到對應公文 {expect_doc_no}"
+                  f"(doSno={want_sno})的閱覽器分頁,不拿其他分頁代替。候選分頁:")
+            for url in seen.values():
+                print(f"        - {url[:110]}")
+        try:
+            driver.switch_to.window(main_handle)
+        except Exception:
+            pass
         return False
 
     try:
-        driver.switch_to.window(new_handle)
+        driver.switch_to.window(target)
     except Exception as e:
         print(f"[document_closure] 切 window 失敗：{type(e).__name__}: {e}")
         return False
@@ -1195,6 +1279,8 @@ def _switch_to_doc_viewer_window(driver):
     try:
         print(f"[document_closure] 切到公文閱覽器分頁，URL={driver.current_url}")
         print(f"[document_closure] 標題={driver.title}")
+        if want_sno:
+            print(f"[document_closure] ✓ 已確認分頁對應公文 {expect_doc_no}(doSno={want_sno})")
     except Exception as e:
         print(f"[document_closure] 讀狀態失敗：{type(e).__name__}: {e}")
     return True
@@ -1442,6 +1528,13 @@ def _process_one_pending_closure_doc(driver):
     except Exception as e:
         print(f"[document_closure] 讀狀態失敗：{type(e).__name__}: {e}")
 
+    # ── 清掉殘留分頁 ──────────────────────────────────────────────────────
+    # 必須在切 frame 之前做(switch_to.window 會重置 frame focus)。不清的話,等一下
+    # 切「非主分頁」時可能切到上一輪沒關乾淨的別件公文閱覽器,在錯的公文上判定
+    # 「如擬」並下載,把別件公文的內容拿來給這件結案(2026-09-16 實機事故)。
+    print("[document_closure] 清掉殘留的公文閱覽器/逾時警告分頁...")
+    _close_stale_viewer_windows(driver)
+
     # ── 切到內容 frame ────────────────────────────────────────────────────
     # 待結案清單在 dTreeContent iframe 內，操作前必須切換 frame
     target_xpath = "//th[contains(normalize-space(), '公文文號')]"
@@ -1469,7 +1562,8 @@ def _process_one_pending_closure_doc(driver):
     # 點公文後系統開新分頁(公文閱覽器),切回主文件並切到新分頁
     driver.switch_to.default_content()
     time.sleep(1)
-    if not _switch_to_doc_viewer_window(driver):
+    # 傳入 doc_no —— 只接受 URL doSno 對得上這件公文的分頁,切錯就停(不猜)
+    if not _switch_to_doc_viewer_window(driver, expect_doc_no=doc_no):
         print("[document_closure] 切不到公文閱覽器分頁，無法判定核決狀態，結束。")
         return False
 

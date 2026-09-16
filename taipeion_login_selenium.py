@@ -21,6 +21,7 @@ Smart Card API，HiCOS 無法讀卡。
 
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from datetime import datetime
@@ -107,29 +108,105 @@ def _mark_profile_clean_exit():
                 pass
 
 
+def _purge_login_db_keep_blacklist(path):
+    """對單一 Login Data 類 SQLite 檔清掉密碼、但保留使用者按過「永不儲存」的黑名單列。
+
+    黑名單列（logins.blacklisted_by_user = 1）本身不含密碼，只是個「這個網站不要問我
+    存密碼」的封鎖標記；舊版整檔刪除連這個標記也一起洗掉，導致使用者每次都要在 Chrome
+    密碼泡泡上重按一次「一律不要」。這裡改成開 SQLite 直接下 DELETE，只留黑名單列。
+
+    回傳值：
+      (kept, deleted) — 成功時，分別是保留的黑名單列數、刪除的密碼列數
+      None            — 欄位不存在（舊版 Chrome schema）或任何操作失敗，呼叫端應 fallback
+                        整檔刪除（安全性優先：寧可刪檔也不留下有密碼的 DB）。
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        columns = [row[1] for row in cur.execute("PRAGMA table_info(logins)")]
+        if "blacklisted_by_user" not in columns:
+            # 舊版 Chrome 沒有這個欄位，無法區分黑名單列，交給呼叫端整檔刪除
+            return None
+        kept = cur.execute(
+            "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 1"
+        ).fetchone()[0]
+        cur.execute(
+            "DELETE FROM logins WHERE blacklisted_by_user IS NULL "
+            "OR blacklisted_by_user != 1"
+        )
+        deleted = cur.rowcount
+        conn.commit()
+        return (kept, deleted)
+    except Exception:
+        # 檔案被鎖、損壞、非 SQLite、logins 表不存在……任何例外一律 fallback 整檔刪除，
+        # 呼叫端會印出原因，這裡不重複印
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _purge_saved_passwords():
-    """刪除 Selenium profile 內的已存密碼資料庫（2026-07-14 公告失敗根因的斷根步驟）。
+    """清掉 Selenium profile 內的已存密碼，但保留使用者的「永不儲存密碼」黑名單
+    （2026-07-14 公告失敗根因的斷根步驟；2026-09-16 改良：避免蓋掉黑名單）。
 
     此 profile 曾被登入 Google 帳號，同步下使用者個人密碼庫（Login Data For
     Account 數百筆，含校網 passport 登入頁與 login.gov.taipei）。Chrome 在登入頁
     欄位 focus 時把已存帳密蓋進欄位，和腳本的 send_keys 打架 → 公告失敗。
     自動化所需帳密全部來自 env.env，此 profile 不需要也不該存任何密碼。
     _build_chrome_options 的 prefs 已關閉密碼管理員（第一層）；本函式在 Chrome
-    啟動前把既存資料庫實體刪除（第二層），即使日後有人在此 profile 手動存密碼
-    或重新同步，下次啟動也會被清掉。檔案被鎖時印 WARN、不中斷流程。"""
+    啟動前清掉既存密碼（第二層）。
+
+    最早的版本是整個刪除 Login Data / Login Data For Account 檔案，但「永不為此
+    網站儲存密碼」的黑名單標記（logins.blacklisted_by_user = 1，沒有密碼、只是個
+    封鎖記號）也存在同一個檔案裡，整檔刪除連這個標記也洗掉，導致使用者每次按過
+    「一律不要」，下次跑程式又被清掉、Chrome 密碼泡泡又跳出來一次。現在改用
+    sqlite3 只刪 logins 表裡「非黑名單」的列，保留黑名單列；開檔或操作失敗（檔案
+    被鎖、損壞、非 SQLite、欄位不存在等）一律 fallback 回整檔刪除 —— 安全性不能
+    退步，寧可刪檔（連黑名單一起沒了，泡泡會再跳一次）也不能留下有密碼的 DB。
+    -journal 檔本來就只是交易殘留檔，沒有需要保留的內容，維持直接刪除。"""
     profile_path = os.path.join(USER_DATA_DIR, PROFILE_DIR)
-    removed = 0
-    for filename in ("Login Data", "Login Data-journal",
-                     "Login Data For Account", "Login Data For Account-journal"):
+
+    kept_total = 0
+    deleted_total = 0
+    fallback_removed = 0
+
+    for db_name in ("Login Data", "Login Data For Account"):
+        p = os.path.join(profile_path, db_name)
+        if not os.path.isfile(p):
+            continue
+        result = _purge_login_db_keep_blacklist(p)
+        if result is not None:
+            kept, deleted = result
+            kept_total += kept
+            deleted_total += deleted
+            print(f"      OK：{db_name} 已清密碼 {deleted} 筆，保留「永不儲存」黑名單 {kept} 筆")
+        else:
+            print(f"      [WARN] {db_name} 無法用 SQLite 保留黑名單清除，"
+                  f"fallback 整檔刪除（連黑名單標記一起清除，密碼泡泡下次會再跳一次）")
+            try:
+                os.remove(p)
+                fallback_removed += 1
+            except OSError as e:
+                print(f"      [WARN] fallback 刪除 {db_name} 也失敗：{type(e).__name__}: {e}")
+
+    for filename in ("Login Data-journal", "Login Data For Account-journal"):
         p = os.path.join(profile_path, filename)
         if os.path.isfile(p):
             try:
                 os.remove(p)
-                removed += 1
+                fallback_removed += 1
             except OSError as e:
-                print(f"      [WARN] 刪除已存密碼檔 {filename} 失敗：{type(e).__name__}: {e}")
-    if removed:
-        print(f"      OK：已清除 profile 內已存密碼資料庫（{removed} 檔）")
+                print(f"      [WARN] 刪除殘留檔 {filename} 失敗：{type(e).__name__}: {e}")
+
+    if kept_total or deleted_total:
+        print(f"      OK：SQLite 清密碼總計 {deleted_total} 筆，保留黑名單總計 {kept_total} 筆")
+    if fallback_removed:
+        print(f"      OK：另整檔刪除／清除殘留檔 {fallback_removed} 個")
 
 
 def _reset_crash_streak():
