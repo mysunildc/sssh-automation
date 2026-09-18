@@ -4,7 +4,7 @@ import stat
 
 from document_closure.document_closure import (
     _force_rmtree, _doc_no_to_sno, _switch_to_doc_viewer_window,
-    _close_stale_viewer_windows,
+    _close_stale_viewer_windows, _click_attachment_archive_and_close,
 )
 
 
@@ -67,9 +67,17 @@ class _FakeViewerDriver:
 
         def window(self, h):
             self._d.current_window_handle = h
+            # 真 Selenium 切 window 會把 frame focus 重置回 top
+            if hasattr(self._d, "in_frame"):
+                self._d.in_frame = False
 
         def default_content(self):
-            pass
+            if hasattr(self._d, "in_frame"):
+                self._d.in_frame = False
+
+        def frame(self, ref):
+            if hasattr(self._d, "in_frame"):
+                self._d.in_frame = True
 
     @property
     def switch_to(self):
@@ -151,3 +159,98 @@ def test_close_stale_viewer_windows_noop_when_only_main():
         {"main": "https://edoc.gov.taipei/tcqb/home/default.jsp"}, current="main")
     assert _close_stale_viewer_windows(d) == 0
     assert d.closed == []
+
+
+# ── 存查前的「附件歸檔」步驟(2026-09-18 使用者指定) ──────────────────────────
+#
+# 存查表單載入後要先點「附件歸檔」,系統另開 AOSDD017F_s09.jsp 分頁,不需輸入任何
+# 東西,直接關掉回存查表單再填檔號。關分頁後一定要切回 dTreeContent frame,否則
+# 後續填檔號會全部找不到元素。
+
+_ARCHIVE_TAB_URL = ("https://edoc.gov.taipei/tcqb/tbkn/aosdd/"
+                    "AOSDD017F_s09.jsp?showBack=N")
+
+
+class _FakeArchiveDriver(_FakeViewerDriver):
+    """在 _FakeViewerDriver 上加:frame 遍歷、點按鈕會開新分頁。
+
+    模擬 edoc 的實際結構:按鈕在 dTreeContent iframe 內,top-level 找不到 ——
+    這正是 2026-09-18 實機失敗的原因(函式原本只在呼叫端的 focus 下找)。
+    """
+
+    def __init__(self, button_xpath_hit=True, opens_tab=True):
+        super().__init__(
+            {"main": "https://edoc.gov.taipei/tcqb/home/default.jsp"}, current="main")
+        self._button_hit = button_xpath_hit
+        self._opens_tab = opens_tab
+        self.clicked = 0
+        self.in_frame = False  # False = top-level
+
+    def find_elements(self, by, xpath):
+        if "iframe" in xpath or "frame" in xpath:
+            return [] if self.in_frame else ["dTreeContent"]
+        # 按鈕只存在於 iframe 內
+        if self._button_hit and self.in_frame and "附件歸檔" in xpath:
+            return [_FakeButton(self)]
+        return []
+
+    def execute_script(self, script, *args):
+        # 點按鈕 → 開附件歸檔分頁
+        if args and isinstance(args[0], _FakeButton):
+            self.clicked += 1
+            if self._opens_tab:
+                self._urls["archive_tab"] = _ARCHIVE_TAB_URL
+        return None
+
+
+class _FakeButton:
+    def __init__(self, driver):
+        self._d = driver
+
+    def is_displayed(self):
+        return True
+
+
+def _patch_frame_switch(monkeypatch, result=True, record=None):
+    """攔截 document_system._switch_to_frame_with_xpath(真的會找 DOM)。"""
+    import document_system
+
+    def _fake(driver, xpath, label, *a, **kw):
+        if record is not None:
+            record.append(label)
+        return result
+
+    monkeypatch.setattr(document_system, "_switch_to_frame_with_xpath", _fake)
+
+
+def test_attachment_archive_opens_closes_and_returns_to_form(monkeypatch):
+    frames = []
+    _patch_frame_switch(monkeypatch, result=True, record=frames)
+    d = _FakeArchiveDriver()
+
+    assert _click_attachment_archive_and_close(d, open_timeout=2) is True
+    assert d.clicked == 1, "要真的點到「附件歸檔」"
+    assert "archive_tab" in d.closed, "附件歸檔分頁要被關掉"
+    assert d.current_window_handle == "main", "要回到存查表單分頁"
+    assert frames, "關分頁後必須重新切回存查表單 frame"
+
+
+def test_attachment_archive_fails_when_button_missing(monkeypatch):
+    _patch_frame_switch(monkeypatch)
+    d = _FakeArchiveDriver(button_xpath_hit=False)
+    assert _click_attachment_archive_and_close(d, open_timeout=1) is False
+
+
+def test_attachment_archive_fails_when_tab_never_opens(monkeypatch):
+    """點了但分頁沒開 → 回 False,且要留在主分頁(不可默默往下存查)。"""
+    _patch_frame_switch(monkeypatch)
+    d = _FakeArchiveDriver(opens_tab=False)
+    assert _click_attachment_archive_and_close(d, open_timeout=1) is False
+    assert d.current_window_handle == "main"
+
+
+def test_attachment_archive_fails_when_frame_switch_back_fails(monkeypatch):
+    """分頁關了但切不回存查表單 frame → 必須回 False,不能繼續填檔號。"""
+    _patch_frame_switch(monkeypatch, result=False)
+    d = _FakeArchiveDriver()
+    assert _click_attachment_archive_and_close(d, open_timeout=2) is False

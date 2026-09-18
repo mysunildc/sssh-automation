@@ -548,6 +548,160 @@ _CONFIRM_SAVE_BUTTON_XPATHS = [
 ]
 
 
+# 存查表單上方「附件歸檔」按鈕(與「確定存檔」同一列)
+_ATTACHMENT_ARCHIVE_BUTTON_XPATHS = [
+    "//input[@value='附件歸檔']",
+    "//*[@value='附件歸檔']",
+    "//button[normalize-space()='附件歸檔']",
+    "//a[normalize-space()='附件歸檔']",
+    "//*[normalize-space()='附件歸檔' and (self::button or @role='button')]",
+    "//*[normalize-space()='附件歸檔']/ancestor::button[1]",
+    "//*[normalize-space()='附件歸檔']/ancestor::a[1]",
+]
+
+# 附件歸檔頁的 URL 特徵(實測:.../tcqb/tbkn/aosdd/AOSDD017F_s09.jsp?showBack=N)
+_ATTACHMENT_ARCHIVE_URL_MARKS = ("aosdd", "AOSDD017F")
+
+
+def _click_button_in_any_frame(driver, xpaths, label, timeout=10):
+    """在 top-level + 所有 iframe 內找第一個可見的 xpaths 元素並點下去。
+
+    為何要自己遍歷 frame:edoc 內容區在 dTreeContent iframe,而呼叫端的 frame focus
+    不一定還在那裡(例如前一步用 _search_keyword_in_all_frames 驗證過欄位,它命中
+    top-level 就會把 focus 留在 top)。既有的 _fill_archive_form_category_input 等
+    函式都是自己遍歷 frame,這裡比照辦理,不依賴呼叫端的 focus 狀態。
+    (2026-09-18 實機:附件歸檔按鈕明明存在於 dTreeContent,卻因 focus 在 top 而找不到。)
+
+    成功 → True(focus 留在點到的那個 frame);timeout 內都沒點到 → False。
+    """
+    def _try_here():
+        for xp in xpaths:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'}); "
+                        "arguments[0].click();", el)
+                    print(f"      OK:點到「{label}」(XPath: {xp})")
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    deadline = time.time() + timeout
+    while True:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        if _try_here():
+            return True
+        try:
+            iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+        except Exception:
+            iframes = []
+        for ifr in iframes:
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(ifr)
+            except Exception:
+                continue
+            if _try_here():
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def _click_attachment_archive_and_close(driver, open_timeout=15):
+    """存查前必經步驟:點「附件歸檔」→ 開新分頁 → 直接關掉 → 回存查表單。
+
+    使用者指定的流程(2026-09-18):存查表單載入後,要先點一次上方的「附件歸檔」,
+    系統會另開一個附件歸檔分頁(AOSDD017F_s09.jsp,頁尾寫明「確認附件歸檔資料無誤後,
+    即可逕行關閉視窗」),不需在該頁做任何輸入,直接關掉回到存查表單,再照原流程填
+    檔號存查。
+
+    關分頁後 **必須重新切回 dTreeContent frame** —— switch_to.window 會把 frame
+    focus 重置回 top document,不切回去的話後面填檔號會全部找不到元素。
+
+    成功 → True(focus 回到存查表單所在 frame);任一步失敗 → False。
+    """
+    from document_system import _switch_to_frame_with_xpath
+
+    try:
+        main_handle = driver.current_window_handle
+        before = set(driver.window_handles)
+    except Exception as e:
+        print(f"      x  讀 window_handles 失敗:{type(e).__name__}: {e}")
+        return False
+
+    if not _click_button_in_any_frame(
+            driver, _ATTACHMENT_ARCHIVE_BUTTON_XPATHS, "附件歸檔"):
+        print("[ERROR] 找不到「附件歸檔」按鈕(top + 所有 frame 都找不到)")
+        return False
+
+    # 等附件歸檔分頁開出來
+    new_handle = None
+    deadline = time.time() + open_timeout
+    while time.time() < deadline:
+        try:
+            now = [h for h in driver.window_handles if h not in before]
+        except Exception:
+            now = []
+        for h in now:
+            try:
+                driver.switch_to.window(h)
+                url = driver.current_url or ""
+            except Exception:
+                continue
+            if any(mark in url for mark in _ATTACHMENT_ARCHIVE_URL_MARKS):
+                new_handle = h
+                print(f"      OK:附件歸檔分頁已開啟 URL={url[:90]}")
+                break
+            # 分頁剛開可能還在 about:blank,留著下一輪再看
+            new_handle = new_handle or None
+        if new_handle:
+            break
+        time.sleep(0.5)
+
+    if new_handle is None:
+        print(f"[ERROR] {open_timeout}s 內沒有偵測到附件歸檔分頁")
+        try:
+            driver.switch_to.window(main_handle)
+        except Exception:
+            pass
+        return False
+
+    # 該頁不需任何輸入,直接關掉(頁尾:「確認附件歸檔資料無誤後,即可逕行關閉視窗」)
+    try:
+        driver.switch_to.window(new_handle)
+        driver.close()
+        print("      OK:已關閉附件歸檔分頁")
+    except Exception as e:
+        print(f"[ERROR] 關閉附件歸檔分頁失敗:{type(e).__name__}: {e}")
+        return False
+
+    try:
+        driver.switch_to.window(main_handle)
+    except Exception as e:
+        print(f"[ERROR] 切回存查表單分頁失敗:{type(e).__name__}: {e}")
+        return False
+
+    # 切回存查表單所在 frame(switch_to.window 已把 frame focus 重置掉)
+    if not _switch_to_frame_with_xpath(
+            driver, "//*[@value='確定存檔']", "存查表單(回到附件歸檔前的畫面)"):
+        print("[ERROR] 關閉附件歸檔分頁後切不回存查表單 frame")
+        return False
+
+    print("      OK:已回到存查表單,繼續填檔號")
+    return True
+
+
 def _click_confirm_save_button(driver, timeout=10):
     """點存查表單上方的「確定存檔」按鈕。
 
@@ -1636,6 +1790,12 @@ def _process_one_pending_closure_doc(driver):
         return False
 
     print(f"[document_closure] ✓ 存查表單已載入且公文文號確認 = 「{doc_no}」")
+
+    # 填檔號前必經步驟:點「附件歸檔」開分頁 → 直接關掉 → 回存查表單(使用者指定流程)
+    print("[document_closure] 點「附件歸檔」,開啟後直接關閉該分頁...")
+    if not _click_attachment_archive_and_close(driver):
+        print("[ERROR] 附件歸檔步驟未完成,保持視窗,不繼續存查。")
+        return False
 
     # 從結案目錄總結讀 #存查分類: 的 8 位檔號(由 summarize_doc 依規格產生)
     print(f"[document_closure] 從結案目錄 *總結.*.md 讀 #存查分類 檔號...")
