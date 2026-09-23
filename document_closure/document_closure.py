@@ -903,6 +903,62 @@ def _fill_pincode_robust(driver, pincode_input, pin):
     return False
 
 
+# KdApp pinCode popup「簽章已自動完成」的判定(2026-09-23 實機 dump):
+# KdApp 勾過「記住 PIN」(#remeber)後,popup 會自動帶入 PIN 直接簽章,**不顯示輸入框**
+# (#pinCode 有值但 offsetParent=null、#signButton 也隱藏),進度文字一路跑到
+# 「…公文文號：MWAAxxxx更新SI檔完成」就停在那裡,視窗**不會自動關**。
+# 舊邏輯只找「可見的」pinCode input → 15s 後報「找不到 pinCode input」,但存查其實已成功
+# (待結案清單當場消失、公文已歸檔)—— 是誤報。這裡把「完成態」認出來並主動關掉視窗。
+_PINCODE_DONE_JS = r"""
+var body = (document.body && document.body.innerText) || '';
+var pin = document.getElementById('pinCode');
+var btn = document.getElementById('signButton');
+var pinVisible = !!pin && pin.offsetParent !== null;
+var pinHidden = !!pin && pin.offsetParent === null;
+var pinFilled = !!pin && ((pin.value || '').length > 0);
+var btnHidden = !btn || btn.offsetParent === null;
+var failed = /失敗|錯誤|不正確|鎖卡|取消/.test(body);
+// 只認「結尾詞」:popup 一開始就會印「初始化完成」,若只比對「完成」,等輸入 PIN 的畫面
+// 也會被誤判成完成而關掉 → 存查真的失敗。輸入框還可見時一律不算完成。
+var finished = /更新SI檔完成|簽章完成|存查完成|歸檔完成/.test(body);
+var done = !failed && !pinVisible && (finished || (pinHidden && pinFilled && btnHidden));
+var why = failed ? 'body 含失敗/錯誤字樣'
+        : pinVisible ? '輸入框仍可見(等使用者/程式輸入 PIN)'
+        : finished ? 'body 含「更新SI檔完成/簽章完成」'
+        : (pinHidden && pinFilled && btnHidden) ? 'pinCode 已填且輸入框/確定鈕皆隱藏'
+        : '尚未完成';
+return {done: done, failed: failed, why: why, tail: body.slice(-80)};
+"""
+
+
+def _pincode_popup_signing_done(driver):
+    """看目前 focus 的 pinCode popup 是否已顯示「簽章完成」。回 (done, why)。
+    任何例外(popup 正在跳轉、DOM 未就緒)一律回 (False, ...),交給呼叫端繼續等。"""
+    try:
+        r = driver.execute_script(_PINCODE_DONE_JS) or {}
+    except Exception as e:
+        return False, f"execute_script 例外:{type(e).__name__}"
+    if r.get("done"):
+        return True, f"{r.get('why')};結尾文字:{(r.get('tail') or '').strip()[-60:]!r}"
+    return False, r.get("why") or "尚未完成"
+
+
+def _close_pincode_popup(driver, new_handle, original_handle):
+    """主動關掉 pinCode popup 並切回主分頁。回 True 表示已關(或早已不在)。"""
+    try:
+        if new_handle in driver.window_handles:
+            driver.switch_to.window(new_handle)
+            driver.close()
+    except Exception as e:
+        print(f"      [WARN] 關閉 pinCode 視窗失敗:{type(e).__name__}: {e}")
+    try:
+        driver.switch_to.window(original_handle)
+        return True
+    except Exception as e:
+        print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
+        return False
+
+
 def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     """處理「確定存檔」後跳出的 pinCode 視窗(URL: localhost:16888/doPostMsg)。
 
@@ -988,6 +1044,14 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     pincode_input = None
     input_deadline = time.time() + 15
     while time.time() < input_deadline and not pincode_input:
+        # 先看是不是「KdApp 記住 PIN → 已自動簽章完成」的完成態:那種畫面沒有可見輸入框,
+        # 繼續找 input 只會等到 timeout 然後誤報失敗(2026-09-23 MWAA1156009472)。
+        done, why = _pincode_popup_signing_done(driver)
+        if done:
+            print(f"      OK:pinCode 視窗顯示簽章已自動完成(記住 PIN 模式):{why}")
+            print("      → 主動關閉 pinCode 視窗、切回主 window")
+            _close_pincode_popup(driver, new_handle, original_handle)
+            return True
         for xp in _PINCODE_INPUT_XPATHS:
             try:
                 els = driver.find_elements(By.XPATH, xp)
@@ -1062,6 +1126,14 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
         if new_handle not in current_handles:
             popup_closed = True
             print("      OK:pinCode 視窗已關閉(系統完成簽章)")
+            break
+        # 視窗還在,但畫面已跑到「…更新SI檔完成」→ 簽章完成只是視窗沒自動關,主動關掉
+        done, why = _pincode_popup_signing_done(driver)
+        if done:
+            print(f"      OK:pinCode 視窗顯示簽章完成但未自動關閉:{why}")
+            print("      → 主動關閉 pinCode 視窗")
+            _close_pincode_popup(driver, new_handle, original_handle)
+            popup_closed = True
             break
         time.sleep(0.3)
     if not popup_closed:

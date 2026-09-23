@@ -5,7 +5,9 @@ import stat
 from document_closure.document_closure import (
     _force_rmtree, _doc_no_to_sno, _switch_to_doc_viewer_window,
     _close_stale_viewer_windows, _click_attachment_archive_and_close,
+    _handle_pincode_popup, _pincode_popup_signing_done,
 )
+import document_closure.document_closure as dc
 
 
 def test_force_rmtree_removes_readonly_shell_dir(tmp_path):
@@ -254,3 +256,77 @@ def test_attachment_archive_fails_when_frame_switch_back_fails(monkeypatch):
     _patch_frame_switch(monkeypatch, result=False)
     d = _FakeArchiveDriver()
     assert _click_attachment_archive_and_close(d, open_timeout=2) is False
+
+
+# ── pinCode popup「記住 PIN → 自動簽章完成」完成態(2026-09-23 MWAA1156009472 誤報) ─────
+#
+# KdApp 勾過「記住 PIN」後 popup 不顯示輸入框、自動簽章,進度停在「…更新SI檔完成」且不自動關;
+# 舊邏輯只找可見 input → 15s 後報「找不到 pinCode input」,但存查其實已成功。
+
+class _FakePinPopupDriver(_FakeViewerDriver):
+    """兩個分頁:main + 16888 popup。popup 的 DOM 狀態由 done_js_result 決定。"""
+
+    def __init__(self, done_js_result, visible_input=False):
+        super().__init__({
+            "main": "https://edoc.gov.taipei/tcqb/home/default.jsp",
+            "popup": "http://localhost:16888/doPostMsg",
+        }, current="main")
+        self._done = done_js_result
+        self._visible_input = visible_input
+        self.filled = []
+
+    def execute_script(self, script, *args):
+        if script is dc._PINCODE_DONE_JS:
+            return self._done
+        return None
+
+    def find_elements(self, by, xpath):
+        if self._visible_input and "pinCode" in xpath and self.current_window_handle == "popup":
+            return [_FakeBtn()]
+        return []
+
+
+class _FakeBtn:
+    def is_displayed(self):
+        return True
+
+
+def test_signing_done_detects_completed_popup():
+    d = _FakePinPopupDriver({"done": True, "why": "body 含「完成」",
+                             "tail": "公文文號：MWAA1156009472更新SI檔完成"})
+    done, why = _pincode_popup_signing_done(d)
+    assert done is True and "完成" in why
+
+
+def test_signing_done_false_when_not_finished_or_failed():
+    d = _FakePinPopupDriver({"done": False, "why": "尚未完成", "tail": ""})
+    assert _pincode_popup_signing_done(d)[0] is False
+    d2 = _FakePinPopupDriver({"done": False, "failed": True, "why": "body 含失敗/錯誤字樣", "tail": "密碼錯誤"})
+    assert _pincode_popup_signing_done(d2)[0] is False
+
+
+def test_handle_pincode_popup_treats_auto_signed_as_success_and_closes(monkeypatch):
+    """完成態:沒有可見 input → 不再報錯,視為成功並主動關掉 popup、切回主分頁。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "630124")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    d = _FakePinPopupDriver({"done": True, "why": "pinCode 已填且輸入框/確定鈕皆隱藏",
+                             "tail": "更新SI檔完成"})
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=1) is True
+    assert "popup" in d.closed, "完成態要主動關掉 popup"
+    assert d.current_window_handle == "main"
+
+
+def test_handle_pincode_popup_still_fails_when_no_input_and_not_done(monkeypatch):
+    """真的沒 input 也沒完成訊號 → 維持 False(popup 保留供手動處理),不可誤判成功。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "630124")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    # 讓 15s 的找 input 迴圈立刻到期
+    t = iter([0, 0, 0, 0, 100, 100, 100, 100, 100])
+    monkeypatch.setattr(dc.time, "time", lambda: next(t, 100))
+    d = _FakePinPopupDriver({"done": False, "why": "尚未完成", "tail": ""})
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=1) is False
+    assert d.closed == [], "沒完成就不能替使用者關掉 popup"
