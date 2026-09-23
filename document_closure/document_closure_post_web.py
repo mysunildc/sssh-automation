@@ -475,13 +475,79 @@ return {ok: false, diag: diag};
 """
 
 
+# New SiteServer 的「發布單位」不是 <select>,是自訂下拉(2026-09-23 實機 dump):
+#   <label for="ct-etAnnoGroup-xxxx">發布單位</label>
+#   <input type="text" readonly id="ct-etAnnoGroup-xxxx">      ← 顯示目前值(如「無群組」)
+#   <div class="select-menu-container"><ul class="select-menu">
+#       <li class="select-item">圖書館</li><li class="select-item">網管中心</li></ul></div>
+# 一次在 JS 內做完「找清單 → 找選項 → 展開 → 點選 → 讀回值」,避免 stale element。
+# 找不到選項時把「站上實際可選清單」回傳給呼叫端印出來 —— 舊版只印各 <select> 的
+# options,這頁沒有 <select>,診斷永遠是 [],使用者無從得知該填哪個(2026-09-23 事故)。
+_SELECT_CUSTOM_UNIT_JS = r"""
+var unit = (arguments[0] || '').trim();
+var lab = document.querySelector('label[for^="ct-etAnnoGroup-"]');
+var input = lab ? document.getElementById(lab.getAttribute('for')) : null;
+if (!input) {
+    // 沒 label 就退而找任何帶 select-menu 的容器
+    var anyMenu = document.querySelector('.select-menu-container .select-menu');
+    if (!anyMenu) return {found: false};
+    input = null;
+}
+var root = input ? input.closest('.p-r-md, .form-group, .form-group-m') : null;
+var menu = null;
+while (root && !menu) {
+    menu = root.querySelector('.select-menu-container .select-menu');
+    if (!menu) root = root.parentElement;
+}
+if (!menu) menu = document.querySelector('.select-menu-container .select-menu');
+if (!menu) return {found: false};
+var items = Array.prototype.slice.call(menu.querySelectorAll('li'));
+var texts = items.map(function (li) { return (li.textContent || '').trim(); });
+var idx = texts.indexOf(unit);
+if (idx < 0) idx = texts.findIndex(function (t) { return t.indexOf(unit) !== -1; });
+if (idx < 0) return {found: true, clicked: false, options: texts,
+                     current: input ? (input.value || '').trim() : ''};
+if (input) { input.focus(); input.click(); }          // 展開清單
+items[idx].click();                                     // 點選項
+// 點完不在這裡讀回值:input.value 由前端框架**非同步**更新,同步讀回永遠是舊值
+// (2026-09-23 實機:點「網管中心」後同步讀仍是「圖書館」,0.3s 後才變)。交給 Python 輪詢。
+return {found: true, clicked: true, text: texts[idx], options: texts,
+        inputId: input ? input.id : null};
+"""
+
+# 讀回「發布單位」readonly input 目前顯示值(給點選後的輪詢驗證用)
+_READ_UNIT_VALUE_JS = (
+    "var e = document.getElementById(arguments[0]); "
+    "return e ? (e.value || '').trim() : null;")
+
+
+def _wait_unit_value(driver, input_id, expected, timeout=3.0, interval=0.2):
+    """輪詢直到「發布單位」input 顯示值 == expected;成功回 True,超時回最後讀到的值。"""
+    if not input_id:
+        return True  # 沒有 input 可驗(理論上不會發生),只能相信點選已生效
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            last = driver.execute_script(_READ_UNIT_VALUE_JS, input_id)
+        except Exception:
+            last = None
+        if last == expected:
+            return True
+        time.sleep(interval)
+    return last
+
+
 def _select_publish_unit(driver, unit):
-    """選「發布單位」下拉 = unit(子字串比對 option 文字)。
+    """選「發布單位」下拉 = unit。
 
     策略 1:原生 <select> — 掃所有 select 找 option 文字含 unit 者設定之。
-    策略 2(fallback):自訂下拉 — 點開「發布單位」label 區塊的控制項,點文字 == unit 的選項。
+    策略 2:New SiteServer 自訂下拉(label[for^=ct-etAnnoGroup] + ul.select-menu li)—
+           展開、點文字 == unit 的 li、讀回 input 值確認。**選項不存在時印出站上
+           實際可選清單**(這才是使用者需要的資訊)。
+    策略 3(舊 fallback):泛用自訂下拉 — 點開「發布單位」label 區塊的控制項,點文字 == unit 的選項。
 
-    成功 → True;找不到 → 印診斷(各 select 的 options)回 False。
+    成功 → True;找不到 → 印診斷回 False(呼叫端 STOP 不發)。
     """
     try:
         r = driver.execute_script(_SELECT_UNIT_JS, unit)
@@ -491,7 +557,30 @@ def _select_publish_unit(driver, unit):
     if r and r.get('ok'):
         print(f"      OK:發布單位已選「{r.get('text')}」")
         return True
-    # fallback:自訂下拉(非原生 select)
+
+    # 策略 2:New SiteServer 自訂下拉
+    try:
+        c = driver.execute_script(_SELECT_CUSTOM_UNIT_JS, unit)
+    except Exception as e:
+        print(f"      [WARN] 選發布單位(自訂下拉)JS 例外:{type(e).__name__}: {e}")
+        c = None
+    if c and c.get('found'):
+        opts = c.get('options') or []
+        if c.get('clicked'):
+            got = _wait_unit_value(driver, c.get('inputId'), c.get('text'))
+            if got is True:
+                print(f"      OK:發布單位(自訂下拉)已選「{c.get('text')}」")
+                return True
+            print(f"      [ERROR] 發布單位選項「{c.get('text')}」已點選但欄位值未更新"
+                  f"(目前=「{got}」)")
+            return False
+        print(f"      [ERROR] 站上「發布單位」沒有「{unit}」這個選項。"
+              f"目前預填=「{c.get('current')}」,站上可選={opts}")
+        print(f"      → 請把 env.env 的 sssh_publish_unit 改成上列其中之一,"
+              f"或到校網後台把此帳號加回「{unit}」群組。")
+        return False
+
+    # 策略 3(舊 fallback):泛用自訂下拉
     try:
         opened = driver.execute_script(r"""
             var lab = null;

@@ -363,3 +363,74 @@ def test_find_attachments_matches_attch_files(tmp_path):
     assert len(got) == 2
     assert all("ATTCH" in _os.path.basename(g) for g in got)
     assert all(_os.path.isabs(g) for g in got)
+
+
+# ── 發布單位:New SiteServer 自訂下拉(2026-09-23 MWAA1156009472 沒公告上校網的根因) ──
+#
+# 校網「發布單位」不是 <select>,是 readonly input + ul.select-menu li。舊版兩個策略都
+# 對不到,且失敗診斷只印各 <select> 的 options(這頁沒有 select → 永遠 []),使用者無從
+# 得知站上到底能選什麼。實機 dump:站上可選只有「圖書館」「網管中心」,env.env 設的
+# 「系管師群組」已不存在(帳號群組被站方改掉)。
+
+_SITE_UNITS = ["圖書館", "網管中心"]
+
+
+class _FakeUnitDriver:
+    """模擬校網新增公告表單:沒有 <select>;自訂下拉只有 _SITE_UNITS 兩個選項。"""
+
+    def __init__(self, native_hit=False, value_updates=True):
+        self.native_hit = native_hit
+        self.value_updates = value_updates  # False = 模擬點了 li 但欄位值一直不更新
+        self.value = "無群組"
+        self.calls = []
+
+    def execute_script(self, script, *args):
+        unit = args[0] if args else ""
+        if script is pw._SELECT_UNIT_JS:
+            self.calls.append("native")
+            return {"ok": True, "text": unit} if self.native_hit else {"ok": False, "diag": []}
+        if script is pw._SELECT_CUSTOM_UNIT_JS:
+            self.calls.append("custom")
+            if unit in _SITE_UNITS:
+                if self.value_updates:
+                    self.value = unit  # 真站是非同步更新;這裡在下一次讀值時就看得到
+                return {"found": True, "clicked": True, "text": unit,
+                        "options": list(_SITE_UNITS), "inputId": "ct-etAnnoGroup-test"}
+            return {"found": True, "clicked": False, "current": "無群組",
+                    "options": list(_SITE_UNITS)}
+        if script is pw._READ_UNIT_VALUE_JS:
+            self.calls.append("read")
+            return self.value
+        self.calls.append("fallback")
+        return False
+
+
+def test_select_publish_unit_custom_dropdown_picks_existing_option():
+    d = _FakeUnitDriver()
+    assert pw._select_publish_unit(d, "圖書館") is True
+    # 原生 select 沒中 → 自訂下拉點選 → 輪詢讀回值確認;不需再走舊 fallback
+    assert d.calls == ["native", "custom", "read"]
+    assert d.value == "圖書館"
+
+
+def test_select_publish_unit_fails_when_value_never_updates(monkeypatch):
+    """點了 li 但 readonly input 的值一直沒變 → 不能當成功(會發到錯的單位)。"""
+    d = _FakeUnitDriver(value_updates=False)
+    monkeypatch.setattr(pw, "_wait_unit_value", lambda *a, **k: "無群組")  # 免等 3s 輪詢
+    assert pw._select_publish_unit(d, "網管中心") is False
+
+
+def test_select_publish_unit_lists_site_options_when_unit_missing(capsys):
+    """env.env 的單位站上不存在 → False,且要把站上實際可選清單與修正提示印出來。"""
+    d = _FakeUnitDriver()
+    assert pw._select_publish_unit(d, "系管師群組") is False
+    out = capsys.readouterr().out
+    assert "系管師群組" in out and "圖書館" in out and "網管中心" in out
+    assert "sssh_publish_unit" in out           # 提示使用者改 env.env
+    assert "診斷=[]" not in out                  # 不再印那個沒資訊的空診斷
+
+
+def test_select_publish_unit_native_select_still_first():
+    d = _FakeUnitDriver(native_hit=True)
+    assert pw._select_publish_unit(d, "圖書館") is True
+    assert d.calls == ["native"]
