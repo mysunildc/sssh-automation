@@ -116,14 +116,28 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wt.DWORD), ("u", _INPUT_UNION)]
 
 
+_ERROR_ACCESS_DENIED = 5
+
+
 def _send_inputs(inputs):
-    """呼叫 SendInput 注入一連串 input 事件。"""
+    """呼叫 SendInput 注入一連串 input 事件。全部送出 → True;否則 False。
+
+    GetLastError=5(ERROR_ACCESS_DENIED)= 桌面目前不接受實體輸入:RDP 已斷線
+    (session Disconnected)或工作站鎖定。這種情況再送幾百次也不會成功,呼叫端應立即
+    中止並提示使用者連回桌面,不要等對話框 10s 後誤報「路徑可能無效」(2026-09-23)。
+    """
     n = len(inputs)
     arr = (_INPUT * n)(*inputs)
     sent = _user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
-    if sent != n:
-        err = ctypes.get_last_error()
+    if sent == n:
+        return True
+    err = ctypes.get_last_error()
+    if err == _ERROR_ACCESS_DENIED:
+        print(f"      [ERROR] SendInput 被拒(ERROR_ACCESS_DENIED):桌面不接受實體輸入 — "
+              f"RDP 已斷線或工作站鎖定")
+    else:
         print(f"      [WARN] SendInput 只送了 {sent}/{n}, GetLastError={err}")
+    return False
 
 
 def _key_event(vk=0, scan=0, flags=0):
@@ -135,13 +149,13 @@ def _key_event(vk=0, scan=0, flags=0):
 
 
 def _send_key(vk):
-    """送 vk 的 down + up。"""
-    _send_inputs([_key_event(vk=vk), _key_event(vk=vk, flags=_KEYEVENTF_KEYUP)])
+    """送 vk 的 down + up。回 _send_inputs 的結果(False = 被拒/未全送)。"""
+    return _send_inputs([_key_event(vk=vk), _key_event(vk=vk, flags=_KEYEVENTF_KEYUP)])
 
 
 def _send_ctrl_combo(vk):
-    """送 Ctrl+<vk>。"""
-    _send_inputs([
+    """送 Ctrl+<vk>。回 _send_inputs 的結果(False = 被拒/未全送)。"""
+    return _send_inputs([
         _key_event(vk=_VK_CONTROL),
         _key_event(vk=vk),
         _key_event(vk=vk, flags=_KEYEVENTF_KEYUP),
@@ -183,9 +197,11 @@ def _send_text_vk(text, per_char_delay=0.02):
             events.append(_key_event(vk=_VK_CONTROL, flags=_KEYEVENTF_KEYUP))
         if shift_state & 1:
             events.append(_key_event(vk=_VK_SHIFT, flags=_KEYEVENTF_KEYUP))
-        _send_inputs(events)
+        if not _send_inputs(events):
+            return False  # 桌面拒收(RDP 斷線/鎖屏):第一個字就失敗,不用再打剩下的
         if per_char_delay > 0:
             time.sleep(per_char_delay)
+    return True
 
 
 def _find_dialog_hwnd(title_contains, timeout=15):
@@ -505,13 +521,21 @@ def _handle_export_dialog(download_dir, timeout=30):
     time.sleep(0.2)
 
     print(f"      鍵盤:Ctrl+A 全選 → 清空 → 輸入 {download_dir} → Enter")
-    _send_ctrl_combo(_VK_A)
-    time.sleep(0.15)
-    _send_key(_VK_BACK)
-    time.sleep(0.15)
-    _send_text_vk(download_dir)
-    time.sleep(0.3)
-    _send_key(_VK_RETURN)
+    # 任何一步 SendInput 被拒就立刻停:桌面不接受實體輸入(RDP 斷線/鎖屏)時,後面幾百個
+    # 按鍵一樣全被拒,硬等對話框關閉 10s 只會誤報「路徑可能無效」(2026-09-23 實機)。
+    steps = (
+        ("Ctrl+A", lambda: _send_ctrl_combo(_VK_A), 0.15),
+        ("Backspace", lambda: _send_key(_VK_BACK), 0.15),
+        ("路徑", lambda: _send_text_vk(download_dir), 0.3),
+        ("Enter", lambda: _send_key(_VK_RETURN), 0.0),
+    )
+    for name, fn, pause in steps:
+        if not fn():
+            print(f"[ERROR] 鍵盤輸入「{name}」送不進對話框 — 桌面目前不接受實體輸入。"
+                  f"請把遠端桌面連回來(保持連線、不鎖屏)後重跑;對話框保留供手動處理。")
+            return False
+        if pause:
+            time.sleep(pause)
 
     # 等對話框關閉
     print("      等對話框關閉...")

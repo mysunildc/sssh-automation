@@ -115,7 +115,7 @@ pin=你的6位數PIN
 sssh_account=校網帳號
 sssh_password=校網密碼
 sssh_publisher=系管師R
-sssh_publish_unit=系管師群組
+sssh_publish_unit=網管中心
 ```
 
 - `pin`:自然人憑證 PIN(edoc 登入用)

@@ -70,3 +70,31 @@ def test_swallows_exceptions_and_returns_false(monkeypatch):
 
     # 絕不能讓 IME 切換失敗中斷自動化主流程
     assert ime_utils.ensure_english_ime(hwnd=0x9999) is False
+
+
+# ── interactive_desktop_state(2026-09-23 RDP 斷線事故) ──────────────────────
+#
+# RDP 斷線後 session 變 Disconnected,SendInput 一律 ERROR_ACCESS_DENIED;Selenium 不受
+# 影響,所以流程會跑到「打路徑進 KdApp 對話框」才失敗。主流程啟動前用它先擋。
+
+def test_desktop_state_active_is_ok(monkeypatch):
+    monkeypatch.setattr(ime_utils, "_query_wts_connect_state", lambda: 0)  # WTSActive
+    ok, reason = ime_utils.interactive_desktop_state()
+    assert ok is True
+    assert "Active" in reason
+
+
+def test_desktop_state_disconnected_is_blocked_with_actionable_reason(monkeypatch):
+    monkeypatch.setattr(ime_utils, "_query_wts_connect_state", lambda: 4)  # WTSDisconnected
+    ok, reason = ime_utils.interactive_desktop_state()
+    assert ok is False
+    assert "Disconnected" in reason
+    assert "SendInput" in reason and "連回" in reason  # 講原因 + 給解法
+
+
+def test_desktop_state_unknown_does_not_block(monkeypatch):
+    """查不到就不擋 — 寧可讓它跑到 SendInput 那步再被明確擋下,不要誤殺正常環境。"""
+    monkeypatch.setattr(ime_utils, "_query_wts_connect_state", lambda: None)
+    ok, reason = ime_utils.interactive_desktop_state()
+    assert ok is True
+    assert "無法判定" in reason

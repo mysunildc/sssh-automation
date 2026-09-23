@@ -22,7 +22,7 @@ from taipeion_login import login_taipeion
 from click_document import click_document_card
 from document_system import process_document_system
 from document_closure.document_closure import process_document_closure
-from ime_utils import ensure_english_ime
+from ime_utils import ensure_english_ime, interactive_desktop_state
 
 # 先把 stdout/stderr 落地到 run.log（與 main.py 同目錄）— 之後所有 print 都會
 # 同步寫進去，下次出問題直接讀檔，不用手動 pipe。在 _close_selenium_chrome_only
@@ -54,6 +54,16 @@ FEATURES = [
 
 def main():
     ensure_english_ime()  # 起手式:把輸入法切回英文，避免後續模擬鍵盤輸入被 IME 攔截
+    # 起手式 2:桌面必須是 Active(RDP 連線中/console 登入中)。RDP 斷線後 Selenium 照常
+    # 能跑,但 KdApp「匯出公文資料」對話框要靠 SendInput 打路徑,會全被拒 —— 與其跑 40s
+    # 後在下載那步莫名失敗,不如啟動前就停下講清楚(2026-09-23 實機事故)。
+    desk_ok, desk_reason = interactive_desktop_state()
+    if not desk_ok:
+        print("!" * 60)
+        print(f"[STOP] {desk_reason}")
+        print("!" * 60)
+        return
+    print(f"      OK：{desk_reason}")
     idx = 0
     if len(sys.argv) > 1:
         try:

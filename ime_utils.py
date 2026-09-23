@@ -39,6 +39,64 @@ _imm32.ImmGetDefaultIMEWnd.argtypes = [ctypes.c_void_p]
 _imm32.ImmGetDefaultIMEWnd.restype = ctypes.c_void_p
 
 
+# ── 互動桌面狀態(WTS) ──────────────────────────────────────────────────────
+# SendInput / pyautogui 這類「實體輸入注入」只在「連線中的互動桌面」才有效。RDP 斷線
+# (session 進入 Disconnected)或工作站鎖定後,SendInput 一律回 0、GetLastError=5
+# (ERROR_ACCESS_DENIED);Selenium/CDP 走 DevTools 不受影響,所以流程會一路成功到
+# 「把路徑打進 KdApp 的 Java 對話框」那一步才莫名失敗(2026-09-23 實機:RDP 斷線後
+# MWAA1156009472 下載對話框卡 10s、誤報「路徑可能無效」)。這裡用 WTS API 讀本 session
+# 的連線狀態,讓主流程在**啟動前**就擋下並講清楚原因。
+_WTS_CURRENT_SERVER_HANDLE = None
+_WTS_CURRENT_SESSION = 0xFFFFFFFF
+_WTS_CONNECT_STATE = 8               # WTS_INFO_CLASS.WTSConnectState
+_WTS_ACTIVE = 0                      # WTS_CONNECTSTATE_CLASS.WTSActive
+_WTS_STATE_NAMES = {0: "Active", 1: "Connected", 2: "ConnectQuery", 3: "Shadow",
+                    4: "Disconnected", 5: "Idle", 6: "Listen", 7: "Reset",
+                    8: "Down", 9: "Init"}
+
+
+def _query_wts_connect_state():
+    """讀本 session 的 WTS_CONNECTSTATE_CLASS 整數;API 失敗或例外回 None(交給呼叫端不誤擋)。"""
+    try:
+        wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
+        buf = ctypes.c_void_p()
+        size = ctypes.c_uint(0)
+        wtsapi32.WTSQuerySessionInformationW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint)]
+        if not wtsapi32.WTSQuerySessionInformationW(
+                _WTS_CURRENT_SERVER_HANDLE, _WTS_CURRENT_SESSION, _WTS_CONNECT_STATE,
+                ctypes.byref(buf), ctypes.byref(size)):
+            return None
+        try:
+            return ctypes.cast(buf, ctypes.POINTER(ctypes.c_int)).contents.value
+        finally:
+            wtsapi32.WTSFreeMemory(buf)
+    except Exception:
+        return None
+
+
+def interactive_desktop_state():
+    """回 (ok, reason):本 session 的桌面目前能不能接受 SendInput/pyautogui 實體輸入。
+
+    ok=True  → 狀態 Active(RDP 連線中或本機 console 登入中)。
+    ok=False → 例如 RDP 已斷線(Disconnected):此時 SendInput 必定被拒(error 5),
+               reason 會說明狀態與解法。
+    查不到(非 Windows / API 失敗)→ 視為 ok=True,不誤擋;reason 註明「無法判定」。
+    """
+    state = _query_wts_connect_state()
+    if state is None:
+        return True, "無法判定桌面狀態(WTS 查詢失敗),不擋"
+
+    name = _WTS_STATE_NAMES.get(state, str(state))
+    if state == _WTS_ACTIVE:
+        return True, f"桌面狀態 {name}"
+    return False, (f"目前 session 桌面狀態 = {name}(非 Active)。RDP 已斷線或工作站鎖定時,"
+                   f"SendInput/pyautogui 的實體輸入一律被拒(ERROR_ACCESS_DENIED),"
+                   f"KdApp「匯出公文資料」對話框的路徑會打不進去。請把遠端桌面連回來、"
+                   f"保持連線且不鎖屏,再重跑。")
+
+
 def ensure_english_ime(hwnd=None):
     """把指定視窗(預設為目前前景視窗)的輸入法強制切成英文(美式鍵盤)。
 
