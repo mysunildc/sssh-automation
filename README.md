@@ -85,11 +85,38 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 
 ## 環境需求
 
-- Windows 10(**必須在螢幕未鎖定狀態執行** — Windows 鎖屏會阻擋 HiCOS 讀卡)
+- Windows 10(**必須在螢幕未鎖定、且桌面 Active 的狀態執行** — 鎖屏會阻擋 HiCOS 讀卡;RDP 斷線後 SendInput 全被拒,`main.py` 起手會自動偵測並 STOP)
+- 讀卡機接在**主機**上,而你**透過遠端桌面(RDP)操作**時,請先讀下方「遠端桌面(RDP)與讀卡機」一節
 - Python 3.14+（以 Windows `py` 啟動器執行；本機裝在 `C:\Python314\`）
 - Google Chrome
 - HiCOS 自然人憑證跨平台元件 + 讀卡機 + 卡片
 - 公文系統 KdApp 本地元件(已隨 edoc 安裝;監聽 `http://127.0.0.1:16888`)
+
+### 遠端桌面(RDP)與讀卡機
+
+讀卡機接在主機、你用 RDP 連進來操作時,會遇到「有時讀得到卡、有時讀不到」。這不是卡片壞,
+是 Windows 的設計([Smart Card and Remote Desktop Services](https://learn.microsoft.com/en-us/windows/security/identity-protection/smart-cards/smart-card-and-remote-desktop-services)、
+[Why can't I see my local smartcard readers when I connect via RDP?](https://learn.microsoft.com/en-us/archive/blogs/instan/why-cant-i-see-my-local-smartcard-readers-when-i-connect-via-rdp)):
+
+- `winscard.dll` 在**被載入的那一刻**決定走向:程式在 **RDP session 內**載入它 → 所有讀卡呼叫
+  **重導到你連進來的那台電腦**,永遠看不到主機上的讀卡機;在 **console** 載入 → 本機處理。
+- 已經載入的程式**不受之後 RDP 連線影響**。所以簽章元件 `TCGServiSign` 只要是在本機語境
+  (開機登入時的啟動項、或 RDP **已斷線**時)被拉起並一直活著,之後 RDP 連進來照樣能讀主機的卡
+  —— 這就是平常能用的原因。
+- 會壞的情境:`TCGServiSign.exe` 主程式偶爾會自己掉(實測 RDP 重連後容易發生)。掉了之後若在
+  **RDP 連線中**被重新拉起,新的讀卡 context 就走重導 → 登入頁一直「重新檢測」、PIN 欄位不出現。
+
+`main.py` 起手會自動處理大部分情況(`servisign_utils.ensure_servisign`):56420 沒人監聽就重啟
+元件,再用 WinSCard 實測讀卡機是否可見;讀不到時依 session 類型印出原因與解法。遇到 STOP 訊息時:
+
+| 狀況 | 怎麼做 |
+|---|---|
+| 訊息說「本程序跑在 RDP session 內…重導」 | 把遠端桌面**中斷連線**(不是登出)→ 等 30 秒 → 重新連線後再跑一次(元件會在斷線的本機語境被重啟);或直接到主機 console 跑 |
+| 訊息說「桌面狀態 = Disconnected」 | RDP 斷線了,KdApp 對話框的鍵盤輸入會全被拒;連回並保持連線、不鎖屏 |
+| console 下仍讀不到讀卡機 | 真的是硬體/HiCOS 問題:拔插讀卡機、用 HiCOS 卡片管理工具檢測 |
+
+另外兩個只能靠人的實體條件:**桌面不能鎖屏**(鎖屏擋 HiCOS 讀卡),以及跑到 KdApp「匯出公文資料」
+對話框那一段(log 有 `等「匯出公文資料」對話框出現`)時**不要動鍵盤滑鼠**(那段用實體鍵盤輸入)。
 
 ### 安裝相依套件
 

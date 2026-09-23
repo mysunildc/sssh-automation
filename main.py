@@ -23,6 +23,7 @@ from click_document import click_document_card
 from document_system import process_document_system
 from document_closure.document_closure import process_document_closure
 from ime_utils import ensure_english_ime, interactive_desktop_state
+from servisign_utils import ensure_servisign
 
 # 先把 stdout/stderr 落地到 run.log（與 main.py 同目錄）— 之後所有 print 都會
 # 同步寫進去，下次出問題直接讀檔，不用手動 pipe。在 _close_selenium_chrome_only
@@ -64,6 +65,16 @@ def main():
         print("!" * 60)
         return
     print(f"      OK：{desk_reason}")
+    # 起手式 3:簽章元件 TCGServiSign 健康檢查 + 自癒。主程式會自己掉(9/16、9/23 各一次),
+    # 掉了登入頁就一直「重新檢測」、看起來像卡片壞了;56420 沒人聽就自動重啟,再用 WinSCard
+    # 實測讀卡機是否可見 —— 在 RDP 語境被重啟的元件會讀不到主機的卡,那時要講清楚怎麼辦。
+    sign_ok, sign_reason = ensure_servisign(expect_reader_substr="EZ100PU")
+    if not sign_ok:
+        print("!" * 60)
+        print(f"[STOP] {sign_reason}")
+        print("!" * 60)
+        return
+    print(f"      OK：{sign_reason}")
     idx = 0
     if len(sys.argv) > 1:
         try:
