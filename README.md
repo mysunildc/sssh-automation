@@ -106,13 +106,23 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 - 會壞的情境:`TCGServiSign.exe` 主程式偶爾會自己掉(實測 RDP 重連後容易發生)。掉了之後若在
   **RDP 連線中**被重新拉起,新的讀卡 context 就走重導 → 登入頁一直「重新檢測」、PIN 欄位不出現。
 
-`main.py` 起手會自動處理大部分情況(`servisign_utils.ensure_servisign`):56420 沒人監聽就重啟
-元件,再用 WinSCard 實測讀卡機是否可見;讀不到時依 session 類型印出原因與解法。遇到 STOP 訊息時:
+**解法(2026-09-24 實機驗證,`main.py` 起手自動做,`servisign_utils.ensure_servisign`)**:
+在 RDP 語境下,程式會把簽章元件的主程式 `TCGServiSign.exe 0` 以 **SYSTEM 身分啟動到 session 0**
+(透過排程工作;`scripts/servisign_session0.ps1`,需提權 —— 本機 UAC 設為提權不提示,全自動;其他
+機器會跳 UAC 要按「是」)。session 0 的 winscard 走本機 PC/SC,所以**同一個 RDP 連線下登入頁就能偵測到
+卡**(實測:元件在使用者 session → 停在「請確認已接上讀卡機」;切到 session 0 → 「登入」按鈕出現)。
+- 只啟動主程式、不啟動 Monitor:Monitor 在沒有桌面的 session 0 會立刻退出。
+- 登入啟動項的 Monitor 之後在使用者 session 起來時,看到 56420 已被 session 0 持有就不會再拉第二份,
+  兩者可並存(實測)。
+- console 語境維持原本 Monitor 方式重啟,並用 WinSCard 實測讀卡機可見。**WinSCard 檢查只在 console
+  有意義**:RDP 下任何新程序自己的 winscard 也被重導、清單必為空,不能拿來判元件能不能讀卡。
+
+遇到 STOP 訊息時:
 
 | 狀況 | 怎麼做 |
 |---|---|
-| 訊息說「本程序跑在 RDP session 內…重導」 | 把遠端桌面**中斷連線**(不是登出)→ 等 30 秒 → 重新連線後再跑一次(元件會在斷線的本機語境被重啟);或直接到主機 console 跑 |
-| 訊息說「桌面狀態 = Disconnected」 | RDP 斷線了,KdApp 對話框的鍵盤輸入會全被拒;連回並保持連線、不鎖屏 |
+| 「RDP 語境下無法把簽章元件切到 session 0…可能是提權(UAC)被拒」 | 在 UAC 對話框按「是」後重跑;或把遠端桌面**中斷連線**(不是登出)→ 等 30 秒 → 重連再跑;或到主機 console 跑 |
+| 「桌面狀態 = Disconnected」 | RDP 斷線了,KdApp 對話框的鍵盤輸入會全被拒;連回並保持連線、不鎖屏 |
 | console 下仍讀不到讀卡機 | 真的是硬體/HiCOS 問題:拔插讀卡機、用 HiCOS 卡片管理工具檢測 |
 
 另外兩個只能靠人的實體條件:**桌面不能鎖屏**(鎖屏擋 HiCOS 讀卡),以及跑到 KdApp「匯出公文資料」
