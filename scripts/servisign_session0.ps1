@@ -19,8 +19,8 @@ try {
   L "start (elevated=$(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)))"
   if (-not (Test-Path $exe)) { L "exe not found: $exe"; exit 1 }
 
-  # Stop whatever copy is running in a user session (a SYSTEM/session-0 copy, if any, is left alone
-  # only if it already owns the port; otherwise it is restarted too so we end in a known state).
+  # Stop EVERY running copy (user-session AND any earlier SYSTEM/session-0 one) so we restart from a
+  # known state. The non-elevated caller kills nothing itself: if UAC is denied, nothing changes.
   Get-Process -Name "TCGServiSign*" -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 2
 

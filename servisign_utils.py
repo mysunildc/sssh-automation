@@ -54,32 +54,67 @@ def servisign_listening(port=SERVISIGN_PORT, timeout=1.0):
         return False
 
 
-def servisign_main_sessions():
-    """回傳所有 TCGServiSign.exe 主程式所在的 session id(list,可能為空)。
+def servisign_main_procs():
+    """回傳所有 TCGServiSign.exe 主程式的 {pid: session_id};沒跑回 {};**探測失敗回 None**。
 
     用 tasklist /FO CSV 解析(欄位:Image Name, PID, Session Name, Session#, Mem Usage)。
     SYSTEM 在 session 0 的進程一般使用者也看得到,足以判定「有沒有跑在 session 0」。
+    None 與 {} 必須分開:tasklist 暫時失敗不能被當成「元件不在」而觸發整輪 kill+提權。
     """
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {SERVISIGN_MAIN_IMAGE}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, errors="replace", timeout=10).stdout
     except Exception:
-        return []
-    sessions = []
+        return None
+    procs = {}
     for line in out.splitlines():
         parts = [p.strip().strip('"') for p in line.split('","')]
         if len(parts) >= 4 and parts[0].lower() == SERVISIGN_MAIN_IMAGE.lower():
             try:
-                sessions.append(int(parts[3]))
+                procs[int(parts[1])] = int(parts[3])
             except ValueError:
                 continue
-    return sessions
+    return procs
 
 
-def servisign_in_session0():
-    """主程式是否有一份跑在 session 0(本機讀卡語境)。"""
-    return 0 in servisign_main_sessions()
+def servisign_main_sessions():
+    """回傳所有主程式所在的 session id(list,可能為空);探測失敗回 None。"""
+    procs = servisign_main_procs()
+    return None if procs is None else sorted(procs.values())
+
+
+def servisign_port_owner_pid(port=SERVISIGN_PORT):
+    """回傳監聽 127.0.0.1:port 的 PID;沒人聽回 None;探測失敗也回 None(netstat -ano)。"""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                             capture_output=True, text=True, errors="replace", timeout=10).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if (len(parts) >= 5 and parts[0].upper() == "TCP"
+                and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING"):
+            try:
+                return int(parts[4])
+            except ValueError:
+                continue
+    return None
+
+
+def servisign_in_session0(procs=None):
+    """56420 是否由「跑在 session 0 的主程式」持有(本機讀卡語境)。
+
+    只看「session 0 有一份主程式」不夠:使用者 session 那份若先搶到 port(登入時 Monitor 先起),
+    登入頁對話的仍是被重導的那份。所以判準是「port 持有者的 PID 在 session 0」。
+    procs 可傳入 servisign_main_procs() 的結果避免重查;探測失敗回 False。
+    """
+    if procs is None:
+        procs = servisign_main_procs()
+    if not procs:
+        return False
+    owner = servisign_port_owner_pid()
+    return owner is not None and procs.get(owner) == 0
 
 
 def list_smartcard_readers():
@@ -167,33 +202,55 @@ def restart_servisign(wait_listen=15.0):
 
 # ── 重啟:RDP 語境(session 0 方式,需提權) ──────────────────────────────────────────
 
-def start_servisign_session0(wait=45.0):
-    """以 RunAs 提權執行 scripts/servisign_session0.ps1:停掉使用者 session 的元件、用排程工作把
-    主程式以 SYSTEM 啟動到 session 0。回 (ok, detail)。
+def session0_log_path():
+    return os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "servisign_session0.log")
+
+
+def start_servisign_session0(wait=45.0, grace=10.0):
+    """以 RunAs 提權執行 scripts/servisign_session0.ps1:停掉現有元件、用排程工作把主程式以 SYSTEM
+    啟動到 session 0。回 (ok, detail)。
 
     此機 UAC 為「提權不提示」→ 全自動;其他機器會跳 UAC,使用者需按「是」。
-    成功判準不是 exit code,而是回到本程序後實測:56420 有人聽 且 主程式在 session 0。
+    - **提權前不殺任何東西**:殺進程由提權後的 .ps1 做。否則 UAC 被拒時元件全死、Monitor 也沒了,
+      比呼叫前更糟(2026-09-28 code review)。
+    - 外層 powershell 以 -PassThru 把提權腳本的 exit code 帶回來;UAC 取消 → Start-Process 丟例外
+      → exit 1。非 0 就不再空等 wait 秒,只做一次現況確認就回報,並指出 log 位置。
+    - -Wait 逾時(有時會拖著)→ 重設計時,再給 grace 秒以實際狀態為準(舊版計時共用,逾時後
+      輪詢迴圈一次都不會跑)。
+    成功判準:56420 有人聽 且 持有者是 session 0 的主程式。
     """
     if not os.path.isfile(SESSION0_SCRIPT):
         return False, f"找不到 {SESSION0_SCRIPT}"
-    # 先殺使用者 session 的那組(SYSTEM 的殺不到、也不需要殺)
-    subprocess.run(taskkill_argv(), capture_output=True, text=True, errors="replace")
-    ps = (f"Start-Process powershell -Verb RunAs -Wait -ArgumentList "
-          f"'-NoProfile -ExecutionPolicy Bypass -File \"{SESSION0_SCRIPT}\"'")
+    ps = (f"$p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "
+          f"'-NoProfile -ExecutionPolicy Bypass -File \"{SESSION0_SCRIPT}\"'; exit $p.ExitCode")
     t0 = time.time()
+    rc = None
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       capture_output=True, text=True, errors="replace", timeout=wait)
+        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                              capture_output=True, text=True, errors="replace", timeout=wait)
+        rc = proc.returncode
     except subprocess.TimeoutExpired:
-        pass  # 有時 -Wait 會拖著;下面以實際狀態為準
+        t0 = time.time()
+        wait = grace
     except Exception as e:
         return False, f"提權啟動失敗:{type(e).__name__}: {e}"
-    while time.time() - t0 < wait:
-        if servisign_listening() and servisign_in_session0():
+    if rc not in (None, 0):
+        wait = 0.0  # 提權被拒或腳本失敗:只確認一次現況,不空等
+
+    def _ok():
+        return servisign_listening() and servisign_in_session0()
+
+    while True:
+        if _ok():
             return True, f"{round(time.time() - t0, 1)}s"
+        if time.time() - t0 >= wait:
+            break
         time.sleep(0.5)
-    return False, (f"{int(wait)}s 內 56420 未由 session 0 的主程式監聽"
-                   f"(sessions={servisign_main_sessions()}, listening={servisign_listening()})")
+    if rc not in (None, 0):
+        return False, (f"提權腳本回傳 {rc}(UAC 被拒、或腳本內失敗),細節見 {session0_log_path()}")
+    return False, (f"{int(wait)}s 內 56420 未由 session 0 的主程式持有"
+                   f"(sessions={servisign_main_sessions()}, listening={servisign_listening()},"
+                   f" log={session0_log_path()})")
 
 
 # ── 起手式決策 ────────────────────────────────────────────────────────────────────
@@ -211,21 +268,29 @@ def ensure_servisign(auto_restart=True, expect_reader_substr=None):
     """
     console = _session_is_console()
     alive = servisign_listening()
-    in_s0 = servisign_in_session0()
 
     if console is False:  # ── RDP ──
-        if alive and in_s0:
+        procs = servisign_main_procs()
+        if procs is None and alive:
+            procs = servisign_main_procs()  # tasklist 偶發失敗:重試一次
+        if procs is None and alive:
+            # 元件活著但查不到它在哪個 session:不能因探測失敗就把它殺掉重建
+            return False, (f"RDP 語境:簽章元件在監聽 :{SERVISIGN_PORT},但 tasklist 查不到主程式所在 session,"
+                           f"無法判定是否在 session 0;請重跑一次")
+        if alive and servisign_in_session0(procs):
             return True, "RDP 語境:簽章元件跑在 session 0(本機讀卡語境),讀卡機不受 RDP 重導影響"
+        sessions = sorted(procs.values()) if procs else []
         where = ("未監聽 :%d" % SERVISIGN_PORT) if not alive else \
-                f"跑在使用者 session {servisign_main_sessions()}(RDP 語境,讀卡會被重導到用戶端)"
+                f"跑在使用者 session {sessions}(RDP 語境,讀卡會被重導到用戶端)"
         if not auto_restart:
             return False, f"RDP 語境:簽章元件{where};需切到 session 0 才能讀主機的卡"
         print(f"      [WARN] RDP 語境:簽章元件{where},改以 SYSTEM 啟動到 session 0(提權)...")
         ok, detail = start_servisign_session0()
         if ok:
             return True, f"RDP 語境:已把簽章元件切到 session 0({detail}),可讀主機讀卡機"
-        return False, (f"RDP 語境下無法把簽章元件切到 session 0:{detail}。可能是提權(UAC)被拒。"
-                       f"替代做法:把遠端桌面「中斷連線」(不是登出)後等 30 秒再重連重跑,或到主機 console 操作。")
+        return False, (f"RDP 語境下無法把簽章元件切到 session 0:{detail}。"
+                       f"替代做法:重跑並在 UAC 對話框按「是」;或以系統管理員身分手動執行 "
+                       f"{SESSION0_SCRIPT};或到主機 console 操作(console 語境走 Monitor 模式)。")
 
     # ── console(或判定不出) ──
     restarted = False
@@ -244,8 +309,7 @@ def ensure_servisign(auto_restart=True, expect_reader_substr=None):
     if readers and (not expect_reader_substr
                     or any(expect_reader_substr.lower() in r.lower() for r in readers)):
         tag = "(剛自癒重啟)" if restarted else ""
-        s0 = "(元件在 session 0)" if in_s0 else ""
-        return True, f"簽章元件正常{tag}{s0},讀卡機:{readers}"
+        return True, f"簽章元件正常{tag},讀卡機:{readers}"
     where = ("(讀卡機清單為空)" if not readers
              else f"(看得到 {readers},但沒有 {expect_reader_substr!r})")
     return False, (f"WinSCard 看不到讀卡機{where}(session={'console' if console else '未知'})。"

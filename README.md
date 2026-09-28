@@ -121,7 +121,7 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 
 | 狀況 | 怎麼做 |
 |---|---|
-| 「RDP 語境下無法把簽章元件切到 session 0…可能是提權(UAC)被拒」 | 在 UAC 對話框按「是」後重跑;或把遠端桌面**中斷連線**(不是登出)→ 等 30 秒 → 重連再跑;或到主機 console 跑 |
+| 「RDP 語境下無法把簽章元件切到 session 0…提權腳本回傳 1」 | 在 UAC 對話框按「是」後重跑;或以系統管理員身分手動執行 `scripts\servisign_session0.ps1`(細節見 `%TEMP%\servisign_session0.log`);或到主機 console 跑。提權前程式不會殺任何進程,UAC 被拒時元件維持原狀 |
 | 「桌面狀態 = Disconnected」 | RDP 斷線了,KdApp 對話框的鍵盤輸入會全被拒;連回並保持連線、不鎖屏 |
 | console 下仍讀不到讀卡機 | 真的是硬體/HiCOS 問題:拔插讀卡機、用 HiCOS 卡片管理工具檢測 |
 
