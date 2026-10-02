@@ -1,16 +1,12 @@
-﻿# sssh-automation — Claude Code 規則
+# sssh-automation — Claude Code 規則
 
-## 對話輸出格式
+通用規則（繁中回覆、輸出頁尾、截圖用完即刪、GitHub 推送流程、superpowers skill 自動載入）皆由全域 `~/.claude/CLAUDE.md` 與已啟用的 plugin 提供，本檔不再重複，以免雙重頁尾。
 
-對話的輸出完後，換行加上「引言區塊（Markdown `>` 語法，左側有色條）」，內容為粗體：
+本專案的操作慣例（陳會送出不可復原、憑證卡常駐、催辦自動簽收等）記錄在 Claude Code 的專案記憶目錄，會自動載入；程式架構與執行方式見 `README.md`。
 
-**輸出結束 LDC**
-<!--**輸出結束 LDC 此輸出設定於 C:\Users\ldc\Documents\GitHub\sssh-automation\CLAUDE.md**
--->
-## 操作規則
+## 本專案硬性規則（不依賴記憶目錄，worktree／另機 clone 也適用）
 
-- 程式產生的截圖，確認不再使用後立即刪除
-- 主動使用 superpowers plugin 中可用的 SKILL
-
-
-
+- **「陳會」送出不可復原**：`fill_in_draft` 點「陳會」會把公文真的送給下一關（資媒組長）。程式修正、單元測試、乾跑、讀 log 都可自己做；**唯獨實機點陳會前必須停下來請使用者確認**。驗證登入或導航類修正時，不要放任完整 `main.py` 跑進會送出的後段，看到能證明修正成立的 log 就停（2026-09-14 曾因此誤送一次）。
+- **自然人憑證卡永遠插著**：不要把「需要插卡」當 stop condition，可直接實機跑需要憑證的流程。仍需留意的只有螢幕未鎖定與讀卡機驅動正常。
+- **催辦通知／待簽收自動簽收是預期行為**：`process_document_system` 路徑直接讓 `_select_all_and_signoff` 執行，簽收前不要插入詢問。
+- **結案存查可復原**，與陳會送出區分，不必逐次確認。

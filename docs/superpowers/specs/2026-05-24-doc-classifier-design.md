@@ -268,7 +268,7 @@ MW999/總結.md (summarize_doc.py 剛產出,無 action)
 ### 提交前
 - `python doc_classifier/classifier.py --help` 不爆
 - `python doc_classifier/collect_training.py` 在空 `document_download/` 下不爆
-- 跑 pytest 全綠 (沿用 [CLAUDE.md](../../../CLAUDE.md)「提交前必須執行測試」)
+- 跑 pytest 全綠 (沿用全域 `~/.claude/CLAUDE.md`「GitHub 推送規則」：測試失敗不 commit)
 
 ## 11. 驗收標準 (使用者肉眼驗收)
 

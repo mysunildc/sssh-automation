@@ -429,7 +429,7 @@ def _llm_summarize_aistudio(prompt_text):
     return text, (data.get("modelVersion") or model)
 
 
-# `claude -p` 即使 cwd 設在 tempdir(避開 project CLAUDE.md),仍會載入 **使用者層級**
+# `claude -p` 即使 cwd 設在 tempdir(避開 project 層級的 CLAUDE.md),仍會載入 **使用者層級**
 # 的 ~/.claude/CLAUDE.md。該檔要求「每次輸出末尾加引言區塊」,會被原封不動附在總結
 # 回應尾端、寫進公文總結檔(2026-09-14 實測撞到)。--bare 雖可關掉 CLAUDE.md 探索,
 # 但它同時強制改用 ANTHROPIC_API_KEY(不讀 OAuth),等於放棄訂閱認證,不能用。
@@ -488,8 +488,9 @@ def _llm_summarize_claude_code(prompt_text):
     --output-format json 讓 CLI 回傳結構化 JSON,可從 modelUsage 取得「實際被呼叫
     的模型 ID」(會反映目前訂閱對應的最新模型,如 claude-opus-4-7[1m] 等)。
 
-    cwd 用 tempdir 避免 Claude Code 載到 project 的 CLAUDE.md(會把『對話末尾加引言
-    區塊』之類規則套到回應上)。
+    cwd 用 tempdir 避免 Claude Code 載到 project 層級的 CLAUDE.md。注意:頁尾「引言
+    區塊」規則來自全域 ~/.claude/CLAUDE.md(2026-10-02 起專案 CLAUDE.md 已無頁尾規則),
+    tempdir 擋不掉它,仍需靠 _strip_claude_md_footer 清掉。
 
     回 (response_text, model_id),失敗回 (None, None)。
     """
