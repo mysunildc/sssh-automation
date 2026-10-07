@@ -909,6 +909,11 @@ def _fill_pincode_robust(driver, pincode_input, pin):
 # 「…公文文號：MWAAxxxx更新SI檔完成」就停在那裡,視窗**不會自動關**。
 # 舊邏輯只找「可見的」pinCode input → 15s 後報「找不到 pinCode input」,但存查其實已成功
 # (待結案清單當場消失、公文已歸檔)—— 是誤報。這裡把「完成態」認出來並主動關掉視窗。
+#
+# 2026-10-07 回歸(MWAA1156009939 連失 28 輪):記住 PIN 模式下 popup **一開始**就是
+# 「#pinCode 有值、輸入框/確定鈕隱藏」,但 body 還停在「執行中請勿關閉此視窗 … 已取得憑證卡號
+# / 取得pincode資料」= 簽章**進行中**。先前把這個狀態也算完成態、立刻關窗 → 簽章被中斷、
+# 公文留在待結案。所以「完成」只認結尾詞;「隱藏+已填」只是 signing(進行中),要繼續等。
 _PINCODE_DONE_JS = r"""
 var body = (document.body && document.body.innerText) || '';
 var pin = document.getElementById('pinCode');
@@ -921,26 +926,78 @@ var failed = /失敗|錯誤|不正確|鎖卡|取消/.test(body);
 // 只認「結尾詞」:popup 一開始就會印「初始化完成」,若只比對「完成」,等輸入 PIN 的畫面
 // 也會被誤判成完成而關掉 → 存查真的失敗。輸入框還可見時一律不算完成。
 var finished = /更新SI檔完成|簽章完成|存查完成|歸檔完成/.test(body);
-var done = !failed && !pinVisible && (finished || (pinHidden && pinFilled && btnHidden));
+var done = !failed && !pinVisible && finished;
+var signing = !failed && !pinVisible && !finished && pinHidden && pinFilled && btnHidden;
 var why = failed ? 'body 含失敗/錯誤字樣'
         : pinVisible ? '輸入框仍可見(等使用者/程式輸入 PIN)'
         : finished ? 'body 含「更新SI檔完成/簽章完成」'
-        : (pinHidden && pinFilled && btnHidden) ? 'pinCode 已填且輸入框/確定鈕皆隱藏'
+        : signing ? '自動簽章進行中(記住 PIN:pinCode 已填且輸入框/確定鈕皆隱藏,尚無完成詞)'
         : '尚未完成';
-return {done: done, failed: failed, why: why, tail: body.slice(-80)};
+return {done: done, signing: signing, failed: failed, why: why, tail: body.slice(-80)};
 """
 
 
-def _pincode_popup_signing_done(driver):
-    """看目前 focus 的 pinCode popup 是否已顯示「簽章完成」。回 (done, why)。
-    任何例外(popup 正在跳轉、DOM 未就緒)一律回 (False, ...),交給呼叫端繼續等。"""
+def _pincode_popup_state(driver):
+    """讀目前 focus 的 pinCode popup 狀態。回 (state, why),state ∈
+    'done'(簽章完成)/ 'signing'(記住 PIN 自動簽章進行中,**不可關窗**)/
+    'failed'(body 出現失敗/錯誤/鎖卡/取消)/ 'pending'(其他)。
+    任何例外(popup 正在跳轉、DOM 未就緒)一律回 ('pending', ...),交給呼叫端繼續等。"""
     try:
         r = driver.execute_script(_PINCODE_DONE_JS) or {}
     except Exception as e:
-        return False, f"execute_script 例外:{type(e).__name__}"
+        return "pending", f"execute_script 例外:{type(e).__name__}"
+    tail = (r.get("tail") or "").strip()[-60:]
     if r.get("done"):
-        return True, f"{r.get('why')};結尾文字:{(r.get('tail') or '').strip()[-60:]!r}"
-    return False, r.get("why") or "尚未完成"
+        return "done", f"{r.get('why')};結尾文字:{tail!r}"
+    if r.get("failed"):
+        return "failed", f"{r.get('why')};結尾文字:{tail!r}"
+    if r.get("signing"):
+        return "signing", f"{r.get('why')};結尾文字:{tail!r}"
+    return "pending", r.get("why") or "尚未完成"
+
+
+def _wait_pincode_popup_finish(driver, new_handle, original_handle, timeout, label,
+                               timeout_result=True):
+    """等 pinCode popup 自己關掉、或畫面跑到完成態(再由程式關掉)。
+    回 True = popup 已不在/已關;timeout 內既沒關也沒完成 → 回 timeout_result
+    (預設 True「可能仍處理中」,維持按確定後的舊語意:陳會路徑把 False 當「公文未送出」,
+    簽章只是慢不能誤報);popup 一律保留,不替使用者關。
+    進行中(signing)只會繼續等 — 關窗會中斷簽章(2026-10-07 實證)。"""
+    deadline = time.time() + timeout
+    last_why = ""
+    while time.time() < deadline:
+        try:
+            current_handles = driver.window_handles
+        except Exception:
+            # driver 暫時性錯誤(popup 跳轉中)不等於視窗已關,下一輪再看
+            time.sleep(0.3)
+            continue
+        if new_handle not in current_handles:
+            print(f"      OK:pinCode 視窗已自行關閉(系統完成簽章){label}")
+            try:
+                driver.switch_to.window(original_handle)
+            except Exception as e:
+                print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
+            return True
+        state, why = _pincode_popup_state(driver)
+        if state == "done":
+            print(f"      OK:pinCode 視窗顯示簽章完成但未自動關閉:{why}")
+            print("      → 主動關閉 pinCode 視窗、切回主 window")
+            _close_pincode_popup(driver, new_handle, original_handle)
+            return True
+        # state=='failed' 只記錄、不提早退出:failed regex 掃整個 body,popup 的「取消」鈕
+        # 等字樣也會命中;真失敗的話視窗不會關,等到 timeout 由下方 WARN 帶出最後狀態。
+        if why != last_why:
+            print(f"      … pinCode 視窗狀態:{state}({why})")
+            last_why = why
+        time.sleep(0.3)
+    print(f"      [WARN] pinCode 視窗 {timeout}s 內沒關閉也沒出現完成詞(最後狀態:{last_why}),"
+          "可能仍處理中;不替使用者關窗、保留供檢查")
+    try:
+        driver.switch_to.window(original_handle)
+    except Exception:
+        pass
+    return timeout_result
 
 
 def _close_pincode_popup(driver, new_handle, original_handle):
@@ -959,13 +1016,15 @@ def _close_pincode_popup(driver, new_handle, original_handle):
         return False
 
 
-def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
+def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20, sign_timeout=60):
     """處理「確定存檔」後跳出的 pinCode 視窗(URL: localhost:16888/doPostMsg)。
 
     流程(全自動,任一步失敗就停):
     1. 等新 window 出現(popup_timeout 秒),switch 過去
     2. 讀 PIN from env.env(失敗 → 停)
     3. 找 pinCode input(失敗 → 停)
+       — 若 popup 是「記住 PIN 自動簽章進行中」(無可見輸入框),改成等它自己跑完
+         (sign_timeout 秒;期間**絕不關窗**,關了簽章會中斷)
     4. _fill_pincode_robust 多策略填入 PIN(全部失敗 → 停)
     5. 點「確定」(失敗 → 停)
     6. 等 popup 關閉(close_timeout)
@@ -1042,16 +1101,44 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     # 找 pinCode input — timeout 拉長到 15s,popup 從 about:blank 切到實際 form
     # 可能要幾秒,DOM ready 的時機難精準預測
     pincode_input = None
-    input_deadline = time.time() + 15
+    start = time.time()
+    input_deadline = start + 15
+    signing_seen = False
+    last_why = ""
     while time.time() < input_deadline and not pincode_input:
+        # popup 自己關掉(KdApp 簽完自動關)→ 成功;切回主 window 失敗只警告,不可吞掉後
+        # 繼續對已不存在的 handle 查狀態空等到 timeout
+        try:
+            popup_gone = new_handle not in driver.window_handles
+        except Exception:
+            popup_gone = False
+        if popup_gone:
+            print("      OK:pinCode 視窗已自行關閉(系統完成簽章)")
+            try:
+                driver.switch_to.window(original_handle)
+            except Exception as e:
+                print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
+            return True
         # 先看是不是「KdApp 記住 PIN → 已自動簽章完成」的完成態:那種畫面沒有可見輸入框,
         # 繼續找 input 只會等到 timeout 然後誤報失敗(2026-09-23 MWAA1156009472)。
-        done, why = _pincode_popup_signing_done(driver)
-        if done:
+        # 「進行中」(signing)也沒有可見輸入框 → 把等待拉長到 sign_timeout 讓它自己跑完;
+        # **不可關窗**(2026-10-07 在此關窗導致簽章中斷、公文留在待結案連失 28 輪)。
+        # 期間仍持續找可見輸入框:若 KdApp 拒絕記住的 PIN、改要求重輸,下面照常接手填。
+        state, why = _pincode_popup_state(driver)
+        if state == "done":
             print(f"      OK:pinCode 視窗顯示簽章已自動完成(記住 PIN 模式):{why}")
             print("      → 主動關閉 pinCode 視窗、切回主 window")
             _close_pincode_popup(driver, new_handle, original_handle)
             return True
+        if state == "signing" and not signing_seen:
+            signing_seen = True
+            input_deadline = start + sign_timeout
+            print(f"      OK:pinCode 視窗為記住 PIN 自動簽章進行中:{why}")
+            print(f"      → 不填 PIN、不關窗,等它自己完成(最多 {sign_timeout}s)...")
+        if why != last_why:
+            if state != "signing":
+                print(f"      … pinCode 視窗狀態:{state}({why})")
+            last_why = why
         for xp in _PINCODE_INPUT_XPATHS:
             try:
                 els = driver.find_elements(By.XPATH, xp)
@@ -1071,7 +1158,11 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
             time.sleep(0.3)
 
     if not pincode_input:
-        print("[ERROR] 找不到 pinCode input,popup 保留供手動處理。")
+        if signing_seen:
+            print(f"[ERROR] 記住 PIN 自動簽章 {sign_timeout}s 內沒完成也沒關窗(最後狀態:{last_why}),"
+                  "popup 保留供檢查,不替使用者關窗。")
+        else:
+            print(f"[ERROR] 找不到 pinCode input(最後狀態:{last_why}),popup 保留供手動處理。")
         try:
             driver.switch_to.window(original_handle)
         except Exception:
@@ -1115,38 +1206,9 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
             pass
         return False
 
-    # 等 popup 關閉
-    close_deadline = time.time() + close_timeout
-    popup_closed = False
-    while time.time() < close_deadline:
-        try:
-            current_handles = driver.window_handles
-        except Exception:
-            current_handles = []
-        if new_handle not in current_handles:
-            popup_closed = True
-            print("      OK:pinCode 視窗已關閉(系統完成簽章)")
-            break
-        # 視窗還在,但畫面已跑到「…更新SI檔完成」→ 簽章完成只是視窗沒自動關,主動關掉
-        done, why = _pincode_popup_signing_done(driver)
-        if done:
-            print(f"      OK:pinCode 視窗顯示簽章完成但未自動關閉:{why}")
-            print("      → 主動關閉 pinCode 視窗")
-            _close_pincode_popup(driver, new_handle, original_handle)
-            popup_closed = True
-            break
-        time.sleep(0.3)
-    if not popup_closed:
-        print(f"      [WARN] pinCode 視窗 {close_timeout}s 內沒關閉,可能仍處理中")
-
-    # 切回主 window
-    try:
-        if original_handle in driver.window_handles:
-            driver.switch_to.window(original_handle)
-            print("      OK:切回主 window")
-    except Exception as e:
-        print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
-    return True
+    # 等 popup 關閉(或畫面跑到「…更新SI檔完成」再由程式關掉);沒關也沒完成 → False
+    return _wait_pincode_popup_finish(driver, new_handle, original_handle,
+                                      close_timeout, "(按確定後)")
 
 
 # 找 doc_no 在可見 <tr>(待結案清單的列)的 JS — 比通用 _FIND_KEYWORD_JS 更精確:
@@ -1154,66 +1216,122 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
 # 消失,仍可能誤命中(系統殘留的 hidden form field、attribute、system message 等),
 # 導致 verify 誤判失敗。
 # 本 JS 只看「可見 <tr>」是否含 doc_no — 與使用者視覺感知一致(看不到 row 就算成功)。
+#
+# 2026-10-07 回歸:點「確定存檔」後畫面是**存查表單**(清單根本沒顯示),「可見列找不到
+# doc_no」恆真 → 簽章其實被中斷、公文還在待結案,verify 卻連報 30 輪成功。所以要回報
+# 「這個 document 是表單還是清單」:看得到「確定存檔」鈕 = 還在表單(state='form');
+# 看得到「公文文號」表頭 = 清單(state='listing',附 found);都沒有 = 'none'。
 _FIND_DOC_IN_VISIBLE_ROW_JS = r"""
 var docNo = arguments[0];
+function visible(el) { return !!el && el.offsetParent !== null; }
+// 「確定存檔」鈕:與 _CONFIRM_SAVE_BUTTON_XPATHS 同範圍(input value / button / a / role=button)
+var btns = document.querySelectorAll('input, button, a, [role="button"]');
+for (var k = 0; k < btns.length; k++) {
+    var b = btns[k];
+    var label = ((b.value || '') + ' ' + (b.textContent || '')).replace(/\s+/g, '');
+    if (label.indexOf('確定存檔') !== -1 && visible(b)) {
+        return {state: 'form', found: false};
+    }
+}
+// 清單表頭 = <th> 含「公文文號」(與 _check_doc_row_checkbox 的 sentinel 一致;存查表單的
+// 「公文文號」是 label 不是 th,不會誤判成清單)
+var hasHeader = false;
+var ths = document.querySelectorAll('th');
+for (var j = 0; j < ths.length; j++) {
+    if (visible(ths[j]) && (ths[j].textContent || '').indexOf('公文文號') !== -1) { hasHeader = true; break; }
+}
+var found = false;
 var trs = document.querySelectorAll('tr');
 for (var i = 0; i < trs.length; i++) {
     var tr = trs[i];
     if (tr.offsetParent === null) continue;  // 不可見跳過
-    var t = (tr.textContent || '').trim();
-    if (t.indexOf(docNo) !== -1) return true;
+    if ((tr.textContent || '').indexOf(docNo) !== -1) { found = true; break; }
 }
-return false;
+return {state: hasHeader ? 'listing' : 'none', found: found};
 """
 
 
-def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
-    """確認 doc_no 已從「待結案」清單可見列消失 → 存查成功。
+def _scan_archive_listing_state(driver, doc_no):
+    """在 top + 每個 iframe 跑 _FIND_DOC_IN_VISIBLE_ROW_JS,彙整回 (state, found):
+    state='form' 只要任一 document 還顯示存查表單;否則 'listing'(有清單表頭)/'none'。
+    found=任一可見列含 doc_no。結束時 focus 回 default_content。"""
+    results = []
 
-    pinCode + popup 關閉後系統會刷新清單;成功歸檔的公文應從清單消失。
-    只看「可見 <tr>」是否含 doc_no — 與視覺感知一致;不掃 hidden form fields
-    / attributes / 系統訊息(會誤命中)。
+    def _run():
+        try:
+            r = driver.execute_script(_FIND_DOC_IN_VISIBLE_ROW_JS, doc_no)
+            if isinstance(r, dict):
+                results.append(r)
+        except Exception:
+            pass
 
-    流程:每 1s 在 top + iframe 跑 _FIND_DOC_IN_VISIBLE_ROW_JS;找不到 → 成功。
-    timeout 內始終找到 → 印 WARN 回 False。
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    _run()
+    try:
+        iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+    except Exception:
+        iframes = []
+    for ifr in iframes:
         try:
             driver.switch_to.default_content()
+            driver.switch_to.frame(ifr)
         except Exception:
-            pass
-        found = False
-        # top-level
-        try:
-            if driver.execute_script(_FIND_DOC_IN_VISIBLE_ROW_JS, doc_no):
-                found = True
-        except Exception:
-            pass
-        # iframes
-        if not found:
+            continue
+        _run()
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    states = {r.get("state") for r in results}
+    found = any(r.get("found") for r in results)
+    state = "form" if "form" in states else ("listing" if "listing" in states else "none")
+    return state, found
+
+
+def _verify_archive_success_by_listing(driver, doc_no, timeout=20, count_before=None):
+    """確認公文真的離開「待結案」→ 存查成功。兩種成功證據(任一即可):
+    1. sidebar「待結案(N)」比 count_before 小(簽章完成後系統會刷新;最可靠)
+    2. 畫面已回到待結案**清單**(有「公文文號」表頭、沒有「確定存檔」鈕)且可見列無 doc_no
+
+    畫面還停在存查表單(看得到「確定存檔」)= 簽章沒完成,**不算成功**(2026-10-07 之前
+    把「清單上找不到」當成功,其實是清單沒顯示,連報 30 輪誤成功)。
+
+    先看畫面:只要還看得到「確定存檔」就直接判「未成功」,sidebar 數字再怎麼變都不算
+    (count_before 是本輪開頭讀的,可能含上一輪尚未刷新的舊值,不能單獨當證據)。
+
+    每 1s 檢查一次;timeout 內都不符 → 印 WARN 回 False。
+    """
+    import document_system as _ds
+
+    deadline = time.time() + timeout
+    last_desc = ""
+    while time.time() < deadline:
+        state, found = _scan_archive_listing_state(driver, doc_no)
+        count_now = -1
+        # 表單還在、或清單上還看得到 doc_no → 這一輪一律不算成功(sidebar 數字不作數)
+        if state != "form" and not found and count_before is not None and count_before >= 0:
             try:
-                iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+                count_now = _ds._get_sidebar_paren_count(driver, "待結案", timeout=1)
             except Exception:
-                iframes = []
-            for ifr in iframes:
-                try:
-                    driver.switch_to.default_content()
-                    driver.switch_to.frame(ifr)
-                    if driver.execute_script(_FIND_DOC_IN_VISIBLE_ROW_JS, doc_no):
-                        found = True
-                        break
-                except Exception:
-                    continue
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
-        if not found:
-            print(f"      OK:doc_no「{doc_no}」已從待結案清單可見列消失,存查成功")
+                count_now = -1
+            if 0 <= count_now < count_before:
+                print(f"      OK:畫面已離開存查表單且 sidebar 待結案 {count_before} → {count_now},"
+                      f"公文「{doc_no}」存查成功")
+                return True
+        if state == "listing" and not found:
+            print(f"      OK:畫面已回到待結案清單且可見列無「{doc_no}」,存查成功")
             return True
+        desc = (f"畫面={state}, 列含doc_no={found}, sidebar待結案={count_now}"
+                f"(送出前={count_before})")
+        if desc != last_desc:
+            print(f"      … 尚未確認成功:{desc}")
+            last_desc = desc
         time.sleep(1)
-    print(f"      [WARN] {timeout}s 內 doc_no「{doc_no}」仍在某個可見列,可能存查未成功")
+    print(f"      [WARN] {timeout}s 內無法確認「{doc_no}」離開待結案(最後:{last_desc}),"
+          "存查可能未成功")
     return False
 
 
@@ -1916,14 +2034,16 @@ def _process_one_pending_closure_doc(driver):
     print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 env.env)、按確定...")
     pin_auto_ok = _handle_pincode_popup(driver)
     if not pin_auto_ok:
-        print("[WARN] 自動 pinCode 處理未完成 — 若 popup 仍開著,請手動填 PIN + 按確定")
+        print("[WARN] 自動 pinCode 處理未完成(詳見上方訊息)— 若 popup 仍開著且有輸入框,"
+              "請手動填 PIN + 按確定;記住 PIN 模式沒有輸入框,請看 popup 顯示的狀態")
         print("[WARN] 程式繼續到 verify 階段(timeout 30s),手動完成後會自動寫標記檔")
 
     # 確認 doc_no 已從「待結案」清單可見列消失 → 存查成功
     # timeout 設 30s:pinCode 自動填失敗時,給使用者手動完成 PIN 的時間
-    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失(等候 30s)...")
-    if not _verify_archive_success_by_listing(driver, doc_no, timeout=30):
-        print("[WARN] doc_no 仍在頁面,存查可能未完成 — 不寫標記,保持視窗供檢查。")
+    print(f"[document_closure] 確認「{doc_no}」已離開待結案(sidebar {count} → 減少,或清單無此文;等候 30s)...")
+    if not _verify_archive_success_by_listing(driver, doc_no, timeout=30, count_before=count):
+        print("[WARN] 無法確認公文離開待結案(可能仍停在存查表單、簽章未完成)— 不寫標記、不公告,"
+              "保持視窗供檢查。")
         return False
 
     # 在結案目錄寫存查完成標記檔

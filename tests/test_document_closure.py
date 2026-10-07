@@ -5,7 +5,7 @@ import stat
 from document_closure.document_closure import (
     _force_rmtree, _doc_no_to_sno, _switch_to_doc_viewer_window,
     _close_stale_viewer_windows, _click_attachment_archive_and_close,
-    _handle_pincode_popup, _pincode_popup_signing_done,
+    _handle_pincode_popup, _pincode_popup_state,
 )
 import document_closure.document_closure as dc
 
@@ -291,24 +291,26 @@ class _FakeBtn:
         return True
 
 
-def test_signing_done_detects_completed_popup():
+def test_popup_state_detects_completed_popup():
     d = _FakePinPopupDriver({"done": True, "why": "body 含「完成」",
                              "tail": "公文文號：MWAA1156009472更新SI檔完成"})
-    done, why = _pincode_popup_signing_done(d)
-    assert done is True and "完成" in why
+    state, why = _pincode_popup_state(d)
+    assert state == "done" and "完成" in why
 
 
-def test_signing_done_false_when_not_finished_or_failed():
+def test_popup_state_pending_signing_failed():
     d = _FakePinPopupDriver({"done": False, "why": "尚未完成", "tail": ""})
-    assert _pincode_popup_signing_done(d)[0] is False
+    assert _pincode_popup_state(d)[0] == "pending"
     d2 = _FakePinPopupDriver({"done": False, "failed": True, "why": "body 含失敗/錯誤字樣", "tail": "密碼錯誤"})
-    assert _pincode_popup_signing_done(d2)[0] is False
+    assert _pincode_popup_state(d2)[0] == "failed"
+    d3 = _FakePinPopupDriver({"done": False, "signing": True, "why": "進行中", "tail": "取得pincode資料"})
+    assert _pincode_popup_state(d3)[0] == "signing"
 
 
 def test_handle_pincode_popup_treats_auto_signed_as_success_and_closes(monkeypatch):
     """完成態:沒有可見 input → 不再報錯,視為成功並主動關掉 popup、切回主分頁。"""
     import taipeion_login_selenium
-    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "630124")
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
     monkeypatch.setattr(dc.time, "sleep", lambda s: None)
     d = _FakePinPopupDriver({"done": True, "why": "pinCode 已填且輸入框/確定鈕皆隱藏",
                              "tail": "更新SI檔完成"})
@@ -321,7 +323,7 @@ def test_handle_pincode_popup_treats_auto_signed_as_success_and_closes(monkeypat
 def test_handle_pincode_popup_still_fails_when_no_input_and_not_done(monkeypatch):
     """真的沒 input 也沒完成訊號 → 維持 False(popup 保留供手動處理),不可誤判成功。"""
     import taipeion_login_selenium
-    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "630124")
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
     monkeypatch.setattr(dc.time, "sleep", lambda s: None)
     # 讓 15s 的找 input 迴圈立刻到期
     t = iter([0, 0, 0, 0, 100, 100, 100, 100, 100])
@@ -330,3 +332,193 @@ def test_handle_pincode_popup_still_fails_when_no_input_and_not_done(monkeypatch
 
     assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=1) is False
     assert d.closed == [], "沒完成就不能替使用者關掉 popup"
+
+
+# ── pinCode popup「記住 PIN → 自動簽章進行中」不可提早關窗(2026-10-07 MWAA1156009939 連失 28 輪) ─
+#
+# 記住 PIN 模式下,popup 一開始就「#pinCode 有值、輸入框/確定鈕隱藏」,但 body 還停在
+# 「執行中請勿關閉此視窗 … 已取得憑證卡號 / 取得pincode資料」= 簽章**進行中**。
+# 舊判定把這個狀態當完成態、立刻關窗 → 簽章被中斷、公文留在待結案,整輪白做。
+# 唯一一輪成功(第 29 輪)正是程式沒找到 popup、放著不動讓它自己跑完。
+
+class _FakeSigningPopupDriver(_FakePinPopupDriver):
+    """done JS 依序回傳 states;耗盡後停在最後一個。self_close_after=N 表示第 N 次
+    查詢後 popup 自己關掉(模擬 KdApp 簽完自動關窗)。"""
+
+    def __init__(self, states, self_close_after=None):
+        super().__init__(states[0])
+        self._states = list(states)
+        self._calls = 0
+        self._self_close_after = self_close_after
+
+    def execute_script(self, script, *args):
+        if script is dc._PINCODE_DONE_JS:
+            self._calls += 1
+            if self._self_close_after is not None and self._calls >= self._self_close_after:
+                if "popup" not in self.closed:
+                    self.closed.append("popup")   # 視窗自己消失,不經 driver.close()
+                    self.current_window_handle = "main"
+            idx = min(self._calls - 1, len(self._states) - 1)
+            return self._states[idx]
+        return None
+
+
+_SIGNING = {"done": False, "signing": True, "why": "自動簽章進行中(記住 PIN)",
+            "tail": "已取得憑證卡號\n取得pincode資料"}
+_FINISHED = {"done": True, "signing": False, "why": "body 含「更新SI檔完成/簽章完成」",
+             "tail": "公文文號：MWAA1156009939更新SI檔完成"}
+
+
+def test_handle_pincode_popup_does_not_close_while_auto_signing(monkeypatch):
+    """進行中 → 不能關窗;等到 body 出現「更新SI檔完成」才關。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    d = _FakeSigningPopupDriver([_SIGNING, _SIGNING, _SIGNING, _FINISHED])
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=5) is True
+    assert d._calls >= 4, "必須一路等到完成態,不能在進行中就關窗"
+    assert d.closed == ["popup"] and d.current_window_handle == "main"
+
+
+def test_handle_pincode_popup_auto_signing_popup_closes_itself(monkeypatch):
+    """進行中、之後 popup 自己關掉 → 視為成功,程式從未主動 close()。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    d = _FakeSigningPopupDriver([_SIGNING], self_close_after=3)
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=5) is True
+    assert d.current_window_handle == "main"
+
+
+def _monotonic_clock(monkeypatch, step=0.1):
+    """單調遞增的假時鐘:每次 time.time() 前進 step 秒,不依賴呼叫次數。"""
+    import itertools
+    c = itertools.count(0.0, step)
+    monkeypatch.setattr(dc.time, "time", lambda: next(c))
+
+
+def test_handle_pincode_popup_auto_signing_never_finishes_returns_false(monkeypatch):
+    """進行中但 sign_timeout 內仍沒完成訊號 → False、popup 保留,不可替使用者關掉。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    _monotonic_clock(monkeypatch)
+    d = _FakeSigningPopupDriver([_SIGNING])
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=1, sign_timeout=2) is False
+    assert d.closed == []
+    assert d._calls > 5, "signing 要把等待拉長到 sign_timeout,不是 15s 找 input 的短迴圈"
+
+
+# ── 存查成功驗證:畫面還停在存查表單 ≠ 公文消失(2026-10-07 誤報 30 輪) ──────────
+#
+# 點「確定存檔」後畫面是存查表單,清單根本沒顯示 → 「可見列找不到 doc_no」恆真,
+# 舊 verify 每輪都報「存查成功」,連寫標記、發公告。要認得「還在表單上」= 未成功,
+# 並以 sidebar「待結案(N)」真的下降為成功依據。
+
+class _FakeVerifyDriver(_FakeViewerDriver):
+    def __init__(self, listing_states, sidebar_counts):
+        super().__init__({"main": "https://edoc.gov.taipei/tcqb/home/default.jsp"}, "main")
+        self._listing = list(listing_states)
+        self._counts = list(sidebar_counts)
+        self.in_frame = False
+
+    def execute_script(self, script, *args):
+        if script is dc._FIND_DOC_IN_VISIBLE_ROW_JS:
+            return self._listing.pop(0) if len(self._listing) > 1 else self._listing[0]
+        return None
+
+    def find_elements(self, by, xpath):
+        return []
+
+    def next_count(self):
+        return self._counts.pop(0) if len(self._counts) > 1 else self._counts[0]
+
+
+def _patch_sidebar_count(monkeypatch, driver):
+    import document_system
+    monkeypatch.setattr(document_system, "_get_sidebar_paren_count",
+                        lambda d, label, timeout=10: driver.next_count())
+
+
+def test_verify_archive_fails_while_form_still_shown(monkeypatch):
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    t = iter([0, 0, 0, 100, 100, 100])
+    monkeypatch.setattr(dc.time, "time", lambda: next(t, 100))
+    d = _FakeVerifyDriver([{"state": "form"}], sidebar_counts=[2])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=1,
+                                                 count_before=2) is False
+
+
+def test_verify_archive_success_when_sidebar_count_dropped(monkeypatch):
+    """表單已消失(過渡態,清單還沒畫出來)+ sidebar 數下降 → 成功。"""
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    d = _FakeVerifyDriver([{"state": "none", "found": False}], sidebar_counts=[2, 1])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=5,
+                                                 count_before=2) is True
+
+
+def test_verify_archive_success_when_listing_shown_without_doc(monkeypatch):
+    """清單已顯示且 doc_no 不在可見列(sidebar 數還沒刷新)→ 成功。"""
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    d = _FakeVerifyDriver([{"state": "listing", "found": False}], sidebar_counts=[2])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=5,
+                                                 count_before=2) is True
+
+
+def test_verify_archive_fails_when_doc_still_in_listing(monkeypatch):
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    t = iter([0, 0, 0, 100, 100, 100])
+    monkeypatch.setattr(dc.time, "time", lambda: next(t, 100))
+    d = _FakeVerifyDriver([{"state": "listing", "found": True}], sidebar_counts=[2])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=1,
+                                                 count_before=2) is False
+
+
+def test_handle_pincode_popup_auto_signing_then_failed_returns_false_without_closing(monkeypatch):
+    """進行中 → 出現失敗字樣(無完成詞、視窗沒自關)→ 等到 sign_timeout 回 False、不關窗。
+    failed 不能提早退出:regex 掃整個 body,popup 的「取消」鈕字樣也會命中。"""
+    import taipeion_login_selenium
+    monkeypatch.setattr(taipeion_login_selenium, "_read_pin", lambda: "000000")
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    _monotonic_clock(monkeypatch)
+    failed = {"done": False, "signing": False, "failed": True, "why": "body 含失敗/錯誤字樣",
+              "tail": "密碼不正確"}
+    d = _FakeSigningPopupDriver([_SIGNING, failed])
+
+    assert _handle_pincode_popup(d, popup_timeout=1, close_timeout=1, sign_timeout=2) is False
+    assert d.closed == [] and d.current_window_handle == "main"
+
+
+def test_verify_archive_fails_when_doc_in_listing_even_if_sidebar_dropped(monkeypatch):
+    """清單上還看得到 doc_no → 即使 sidebar 數字下降(可能是上一輪的補刷新)也不算成功。"""
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    t = iter([0, 0, 0, 100, 100, 100])
+    monkeypatch.setattr(dc.time, "time", lambda: next(t, 100))
+    d = _FakeVerifyDriver([{"state": "listing", "found": True}], sidebar_counts=[1])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=1,
+                                                 count_before=2) is False
+
+
+def test_verify_archive_fails_when_form_shown_even_if_sidebar_dropped(monkeypatch):
+    """count_before 可能含上一輪未刷新的舊值:畫面還在存查表單時,sidebar 下降也不算成功。"""
+    monkeypatch.setattr(dc.time, "sleep", lambda s: None)
+    t = iter([0, 0, 0, 100, 100, 100])
+    monkeypatch.setattr(dc.time, "time", lambda: next(t, 100))
+    d = _FakeVerifyDriver([{"state": "form"}], sidebar_counts=[1])
+    _patch_sidebar_count(monkeypatch, d)
+
+    assert dc._verify_archive_success_by_listing(d, "MWAA1156009952", timeout=1,
+                                                 count_before=2) is False

@@ -57,7 +57,7 @@ def test_not_on_login_page_is_noop(monkeypatch):
     """已在公文系統內（沒有 pinCode 欄位）→ 直接回 True，不讀 env.env。"""
     called = []
     monkeypatch.setattr("taipeion_login_selenium._read_pin",
-                        lambda: called.append(1) or "630124")
+                        lambda: called.append(1) or "000000")
     d = _FakeDriver("https://edoc.gov.taipei/tcqb/home/default.jsp")
     assert cd.edoc_pin_login(d, wait_form=0) is True
     assert called == [], "不在登入頁不該去讀 PIN"
@@ -79,7 +79,7 @@ def test_missing_pin_in_env_fails(monkeypatch):
 
 def test_autofill_tampering_aborts_before_submit(monkeypatch):
     """欄位值被 autofill 蓋掉 → 不送出（錯誤 PIN 連續送出會鎖卡）。"""
-    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "630124")
+    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "000000")
 
     class _TamperedEl(_FakeEl):
         def send_keys(self, s):
@@ -92,7 +92,7 @@ def test_autofill_tampering_aborts_before_submit(monkeypatch):
 
 
 def test_successful_login(monkeypatch):
-    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "630124")
+    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "000000")
     monkeypatch.setattr(cd.time, "sleep", lambda s: None)
 
     pin_el = _FakeEl()
@@ -102,13 +102,13 @@ def test_successful_login(monkeypatch):
         d, "current_url", "https://edoc.gov.taipei/tcqb/home/default.jsp"))
 
     assert cd.edoc_pin_login(d, wait_form=0, wait_nav=5) is True
-    assert pin_el.get_attribute("value") == "630124"
+    assert pin_el.get_attribute("value") == "000000"
     assert d.login_el.clicked == 1
 
 
 def test_submit_without_navigation_fails(monkeypatch):
     """按了登入但一直沒離開 index.jsp → False。"""
-    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "630124")
+    monkeypatch.setattr("taipeion_login_selenium._read_pin", lambda: "000000")
     monkeypatch.setattr(cd.time, "sleep", lambda s: None)
 
     d = _FakeDriver("https://edoc.gov.taipei/tcqb/index.jsp", _FakeEl(), _FakeEl())
