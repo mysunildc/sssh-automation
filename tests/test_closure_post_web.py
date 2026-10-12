@@ -434,3 +434,31 @@ def test_select_publish_unit_native_select_still_first():
     d = _FakeUnitDriver(native_hit=True)
     assert pw._select_publish_unit(d, "圖書館") is True
     assert d.calls == ["native"]
+
+
+def test_subject_line_with_list_marker_prefix():
+    """回歸(2026-10-12 MWAA1156010196):LLM 把主旨寫成「- 主旨：…」(列表符號前綴),
+    舊 regex 只容許 * 前綴 → 抓不到主旨 → 整份回 None → 公告被靜默跳過。
+    - / * / • / 粗體 **主旨**、「- **」等 Markdown 前綴都要容忍,標題內部粗體也要剝掉。"""
+    base = "#存查分類:資安 03750402\n##於官網公告，並轉知各處室及師生\n###陳會\n####重要消息+處室公告\n\n"
+    tail = "\n## 總結\n\n1. 第一點。\n2. 第二點。\n"
+    for subj in ("- 主旨：", "* 主旨：", "• 主旨：", "**主旨**：", "- **主旨**：", "**主旨：**"):
+        text = base + f"- 發文日期：中華民國115年10月5日\n{subj}數位發展部**訂定**「電子看板資通安全管理須知」，請查照。" + tail
+        r = _parse_summary_text(text)
+        assert r is not None, f"主旨寫法 {subj!r} 解析失敗"
+        assert r["title"] == "數位發展部訂定「電子看板資通安全管理須知」，請查照。", f"{subj!r}:{r['title']}"
+        assert r["body"] == "1. 第一點。\n2. 第二點。"
+
+
+def test_body_items_with_markdown_prefix():
+    """條列行也可能被 LLM 加上「- 」或粗體「**1.**」,正規化後仍要當條列,且輸出不含 **。"""
+    text = "##於官網公告\n主旨：標題\n\n- 1. 第一點。\n**2.** 第二點。\n- **3、**第三點。\n"
+    r = _parse_summary_text(text)
+    assert r is not None
+    assert r["body"] == "1. 第一點。\n2. 第二點。\n3、第三點。"
+
+
+def test_subject_with_only_bold_markers_is_missing():
+    """「主旨：**」剝掉粗體後沒有標題 → 視為缺主旨,回 None,不可用「*」當標題發公告。"""
+    text = "##於官網公告\n主旨：**\n1. 內容一。\n"
+    assert _parse_summary_text(text) is None

@@ -29,12 +29,19 @@ ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/library"
 # 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
 ANNOUNCE_KEYWORD = "於官網公告"
 
-# 主旨行：兼容有無 * 前綴、半/全形冒號、冒號前後空白。
-_SUBJECT_RE = re.compile(r'^\*?\s*主旨\s*[:：]\s*(.+)$')
+# 主旨行 / 條列行都先經 _strip_md 正規化(去行首列表符號 - * •、去所有粗體 **)再比對,
+# 不逐次為 LLM 的 Markdown 漂移加 regex 特例。2026-10-12 MWAA1156010196:LLM 寫成
+# 「- 主旨：…」→ 舊 regex 只容許單一 * 前綴 → 抓不到主旨 → 整份回 None → 公告被靜默跳過。
+_SUBJECT_RE = re.compile(r'^主旨\s*[:：]\s*(.+)$')
 # 條列行：1. / 1、 / 1.（後接內容，可無空白）。
-_BODY_ITEM_RE = re.compile(r'^\s*\d+\s*[.、]\s*.+$')
+_BODY_ITEM_RE = re.compile(r'^\d+\s*[.、]\s*.+$')
 # 存查分類行：首行 `#存查分類:研習 03750401` → 取類別名(研習/資安…)。
 _CATEGORY_RE = re.compile(r'^#\s*存查分類\s*[:：]\s*(\S+)')
+
+
+def _strip_md(line):
+    """去掉行首列表符號(- * •)與所有粗體 **,回純文字;主旨/條列比對一律用這個結果。"""
+    return line.lstrip("-*•\t ").replace("**", "").strip()
 
 
 def _normalize_cat(s):
@@ -78,14 +85,15 @@ def _parse_summary_text(text):
         if handling is None and line.startswith("##"):
             handling = line.lstrip("#").strip() or None
             continue
+        plain = _strip_md(line)
         if title is None:
-            m = _SUBJECT_RE.match(line)
+            m = _SUBJECT_RE.match(plain)
             if m:
-                title = m.group(1).strip()
-                subject_seen = True
+                title = m.group(1).strip() or None  # 「主旨：**」剝完只剩空 → 視為沒主旨
+                subject_seen = title is not None
                 continue
-        if subject_seen and _BODY_ITEM_RE.match(line):
-            body_lines.append(line)
+        if subject_seen and _BODY_ITEM_RE.match(plain):
+            body_lines.append(plain)
 
     if title is None or not body_lines:
         return None
@@ -847,7 +855,17 @@ def maybe_post_announcement(driver, extract_dir):
     from taipeion_login_selenium import _read_config
     try:
         summary = _parse_summary(extract_dir)
+        if summary is None:
+            # 不再靜默:2026-10-12 MWAA1156010196 因主旨行格式解析失敗被無聲跳過,使用者事後才發現
+            if not glob.glob(os.path.join(extract_dir, "*總結.*.md")):
+                print(f"[post_web] [WARN] {_doc_no_of(extract_dir)} 沒有 *總結.*.md,"
+                      "無法判斷是否要公告,跳過。")
+            else:
+                print(f"[post_web] [WARN] {_doc_no_of(extract_dir)} 總結無法解析(缺主旨行或條列,"
+                      "或讀檔失敗),無法判斷是否要公告,跳過。請檢查 *總結.*.md 格式。")
+            return False
         if not _should_post(summary):
+            print(f"[post_web] {_doc_no_of(extract_dir)} 承辦文字不含「{ANNOUNCE_KEYWORD}」,不公告。")
             return False
         if _already_announced(extract_dir):
             print(f"[post_web] {_doc_no_of(extract_dir)} 已公告過(清冊或 *已公告.txt),跳過。")
