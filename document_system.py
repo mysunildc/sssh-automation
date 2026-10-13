@@ -1155,7 +1155,7 @@ def pending_doc(driver, label="承辦中"):
         print(f"[pending_doc] 讀 main_handle 失敗：{type(e).__name__}: {e}")
         return False
 
-    from pending_doc_handler import handle_opened_document
+    from pending_doc_handler import handle_opened_document, _close_stale_windows
 
     iteration = 0
     while True:
@@ -1179,22 +1179,40 @@ def pending_doc(driver, label="承辦中"):
                                f"請手動檢視{label}清單,然後再跑 python main.py")
             return False
 
-        # Step 3：切到 dTreeContent frame + 點清單第一筆
+        # Step 3：清掉殘留非主分頁(edoc 二次登入轉址會多開一個「操作時間逾時警告」
+        # 分頁留著,2026-10-13 實機因此切錯分頁),再切到 dTreeContent frame + 點清單第一筆
+        _close_stale_windows(driver)
+        driver.switch_to.default_content()
         target_xpath = "//th[contains(normalize-space(), '公文文號')]"
         if not _switch_to_frame_with_xpath(driver, target_xpath, "公文文號表頭"):
             _print_stop_banner(f"切不到{label}清單 frame",
                                "請手動檢視主 window 內容,然後再跑 python main.py")
             return False
-        if not _click_first_document_in_pending(driver, label=label):
+        try:
+            before_handles = set(driver.window_handles)
+        except Exception:
+            before_handles = {main_handle}
+        doc_no = _click_first_document_in_pending(driver, label=label)
+        if not doc_no:
             driver.switch_to.default_content()
             _print_stop_banner(f"點不到{label}第一筆",
                                f"請手動檢視{label}清單,然後再跑 python main.py")
             return False
 
         # Step 4：等新分頁開 + 交給 handle_opened_document(內含 4-1 下載+總結 + 4-2 fill_in_draft)
-        time.sleep(1)
+        # 傳剛點的文號:只接受 URL 帶對應 doSno 的閱覽器分頁,不拿殘留分頁硬幹
+        # (handle_opened_document 內會輪詢等分頁開,不必再 sleep)。
         driver.switch_to.default_content()
-        handle_opened_document(driver)
+        if not handle_opened_document(driver, expect_doc_no=doc_no,
+                                      before_handles=before_handles):
+            # 沒切到對應閱覽器分頁或下載/解壓失敗 → 4-2 根本沒跑、公文沒動,
+            # 不必再等 sidebar 變化;直接停並指出真正原因。
+            driver.switch_to.window(main_handle)
+            driver.switch_to.default_content()
+            _print_stop_banner(
+                f"公文 {doc_no} 開啟/下載未完成(沒切到對應閱覽器分頁或下載失敗,詳見上方 log),未填字未送出",
+                "請檢查瀏覽器分頁/讀卡狀態,然後再跑 python main.py")
+            return False
 
         # Step 5：用 sidebar「<label>(N)」數變化判定公文是否離開,不能用 window 數
         # (陳會送出過程會短暫多開對話框 → window 從 2 → 3 → 1,看 1 秒後的 window 數

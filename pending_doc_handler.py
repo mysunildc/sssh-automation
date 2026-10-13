@@ -21,6 +21,7 @@ pending_doc_handler.py
 import ctypes
 import ctypes.wintypes as wt
 import os
+import re
 import sys
 import time
 import zipfile
@@ -1170,46 +1171,166 @@ def _download_and_extract(driver, download_dir=None, summarize=True):
     return True, extract_dir
 
 
-def handle_opened_document(driver):
+_SESSION_TIMEOUT_MARK = "sessionTimeout.jsp"
+
+
+def _doc_no_to_sno(doc_no):
+    """公文文號 → 公文閱覽器 URL 的 doSno 流水號(MWAA1156010457 → 1156010457)。
+    抽不出 6 碼以上數字回 None。"""
+    if not doc_no:
+        return None
+    m = re.search(r"(\d{6,})", str(doc_no))
+    return m.group(1) if m else None
+
+
+def _close_stale_windows(driver, only_url_mark=None):
+    """關掉主分頁以外的殘留分頁,回關掉數;focus 留在原分頁。
+
+    only_url_mark=None → 全關(逾時警告頁、上一輪沒關的閱覽器…);給字串 → 只關 URL
+    含該字串的分頁。
+
+    2026-10-13 實機:edoc 二次登入轉址時多開了一個 sessionTimeout.jsp 分頁留著,
+    點公文後 handle_opened_document 挑「最後一個非主分頁」挑到它 → 找不到下載按鈕
+    中止。點公文前先清乾淨,之後「非主分頁」才只會是剛點開的那一個。
+    """
+    try:
+        main_handle = driver.current_window_handle
+        handles = list(driver.window_handles)
+    except Exception as e:
+        print(f"      [WARN] 讀 window_handles 失敗,略過殘留分頁清理:{type(e).__name__}: {e}")
+        return 0
+    closed = 0
+    for h in handles:
+        if h == main_handle:
+            continue
+        try:
+            driver.switch_to.window(h)
+            url = driver.current_url or ""
+            if only_url_mark is not None and only_url_mark not in url:
+                continue
+            print(f"      清掉殘留分頁:{url[:90]}")
+            driver.close()
+            closed += 1
+        except Exception as e:
+            print(f"      [WARN] 關殘留分頁失敗:{type(e).__name__}: {e}")
+    try:
+        driver.switch_to.window(main_handle)
+    except Exception as e:
+        print(f"      [WARN] 切回主分頁失敗:{type(e).__name__}: {e}")
+    if closed:
+        print(f"      OK:已清掉 {closed} 個殘留分頁")
+    return closed
+
+
+def close_session_timeout_tabs(driver):
+    """「操作時間逾時警告」(sessionTimeout.jsp)分頁一出現就立刻關掉,回關掉數。
+
+    edoc 二次登入轉址(auth3.jsp → default.jsp?inLine=Y)會把舊 session 的逾時警告開成
+    新分頁留著(2026-10-13 實機),登入成功後立刻掃一次關掉,後面流程就不會再撞到它。
+    """
+    return _close_stale_windows(driver, only_url_mark=_SESSION_TIMEOUT_MARK)
+
+
+def _url_has_dosno(url, sno):
+    """URL 是否帶 `doSno=<sno>`(整數比對,1156010457 不會被 11560104570 誤中)。"""
+    return re.search(rf"[?&]doSno={re.escape(sno)}(?!\d)", url or "") is not None
+
+
+def _find_doc_viewer_window(driver, main_handle, expect_doc_no=None,
+                            before_handles=None, timeout=10):
+    """找「剛點開那件公文」的閱覽器分頁 handle 並切過去;找不到回 None(並切回主分頁)。
+
+    判定順序:
+    - 一律跳過 URL 含 sessionTimeout.jsp 的分頁(操作時間逾時警告,不是閱覽器)。
+    - expect_doc_no 抽得出 doSno 時,只接受 URL 帶 `doSno=<該數字>` 的分頁。
+    - 否則優先挑 before_handles 以外(點擊後新開)的分頁;點前就存在的分頁只在等到
+      timeout 都沒新分頁時才拿來當 fallback。
+    閱覽器分頁可能晚幾秒才開/才轉到正式 URL,所以輪詢到 timeout。
+    """
+    want_sno = _doc_no_to_sno(expect_doc_no)
+    before = set(before_handles or ())
+    deadline = time.time() + timeout
+    seen = {}
+    while True:
+        try:
+            handles = [h for h in driver.window_handles if h != main_handle]
+        except Exception as e:
+            print(f"[pending_doc_handler] 讀 window_handles 失敗:{type(e).__name__}: {e}")
+            handles = []
+        fallback = None
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                url = driver.current_url or ""
+            except Exception:
+                continue
+            seen[h] = url
+            if _SESSION_TIMEOUT_MARK in url:
+                continue
+            if want_sno is not None:
+                if _url_has_dosno(url, want_sno):
+                    return h
+                continue
+            if h not in before:
+                return h
+            if fallback is None:
+                fallback = h
+        if time.time() >= deadline:
+            if want_sno is None and fallback is not None:
+                try:
+                    driver.switch_to.window(fallback)
+                    return fallback
+                except Exception:
+                    pass
+            break
+        time.sleep(0.5)
+
+    if not seen:
+        print("[pending_doc_handler] 只有主 window,沒偵測到公文閱覽器新分頁。")
+    elif want_sno is None:
+        print("[pending_doc_handler] [ERROR] 非主分頁都是「操作時間逾時警告」頁,沒有公文閱覽器分頁:")
+    else:
+        print(f"[pending_doc_handler] [ERROR] 找不到對應公文 {expect_doc_no}"
+              f"(doSno={want_sno})的閱覽器分頁,不拿其他分頁代替。候選分頁:")
+    for url in seen.values():
+        tag = "(操作時間逾時警告頁)" if _SESSION_TIMEOUT_MARK in url else ""
+        print(f"        - {url[:110]} {tag}")
+    try:
+        driver.switch_to.window(main_handle)
+    except Exception:
+        pass
+    return None
+
+
+def handle_opened_document(driver, expect_doc_no=None, before_handles=None, timeout=10):
     """承辦中公文點完最上方 link、新分頁開啟後的處理流程。
 
     呼叫時機:document_system.pending_doc 點完公文 + sleep 等新 window 開啟之後。
     driver focus 仍在原(承辦中清單) window;本函式負責切到新公文閱覽器分頁。
 
-    流程:
-    1. 確認 window_handles 數 > 1 (新分頁已開)
-    2. 切到非主 handle 的 window(通常是最新開的公文閱覽器)
-    3. 等載入 + 印 URL/title 確認到位
-    4. 呼叫 _download_and_extract:點 toolbar 下載按鈕、下載到
-       document_download/、若為 zip 解到以檔名為路徑的子目錄
-    5. TODO:後續動作 (檢視內容/簽辦/送件/結案等)
+    expect_doc_no:剛點的公文文號 → 只接受 URL 帶對應 doSno 的分頁(不拿殘留的
+    逾時警告頁或別件公文的分頁硬幹)。before_handles:點擊前的 window_handles,
+    沒文號時用來認「新開的」分頁。
 
-    回 True 表示順利切換並完成下載+解壓縮;False 表示沒找到新 window、
+    流程:
+    1. 等「剛點那件」的閱覽器分頁出現並切過去(_find_doc_viewer_window)
+    2. 等載入 + 印 URL/title 確認到位
+    3. 呼叫 _download_and_extract:點 toolbar 下載按鈕、下載到
+       document_download/、若為 zip 解到以檔名為路徑的子目錄
+    4. 4-2 fill_in_draft
+
+    回 True 表示順利切換並完成下載+解壓縮;False 表示沒找到對應閱覽器分頁、
     切換失敗、或下載/解壓縮中途失敗。
     """
     try:
         main_handle = driver.current_window_handle
-        handles = driver.window_handles
     except Exception as e:
-        print(f"[pending_doc_handler] 讀 window_handles 失敗:{type(e).__name__}: {e}")
+        print(f"[pending_doc_handler] 讀 current_window_handle 失敗:{type(e).__name__}: {e}")
         return False
 
-    if len(handles) <= 1:
-        print("[pending_doc_handler] 只有 1 個 window,沒偵測到公文閱覽器新分頁。")
-        return False
-
-    new_handle = None
-    for h in handles:
-        if h != main_handle:
-            new_handle = h
+    new_handle = _find_doc_viewer_window(driver, main_handle, expect_doc_no,
+                                         before_handles=before_handles, timeout=timeout)
     if new_handle is None:
-        print("[pending_doc_handler] 沒找到非主 window 的 handle。")
-        return False
-
-    try:
-        driver.switch_to.window(new_handle)
-    except Exception as e:
-        print(f"[pending_doc_handler] 切 window 失敗:{type(e).__name__}: {e}")
         return False
 
     # 公文閱覽器 (公文簽核 v1.0.344) 載入 PDF + JS 需要幾秒;eager strategy

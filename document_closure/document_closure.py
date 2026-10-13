@@ -1502,53 +1502,14 @@ def _delete_pending_archive(closure_dir):
     return _force_rmtree(src_dir)
 
 
-def _doc_no_to_sno(doc_no):
-    """公文文號 → 公文閱覽器 URL 的 doSno 流水號。
-
-    實測對應:`MWAA1156009372` 的閱覽器 URL 是 `...?app=editor&doSno=1156009372...`
-    —— 即文號去掉英文前綴後的數字部分。抽不出數字回 None。
-    """
-    if not doc_no:
-        return None
-    m = re.search(r"(\d{6,})", str(doc_no))
-    return m.group(1) if m else None
-
-
-def _close_stale_viewer_windows(driver):
-    """關掉主分頁以外所有殘留分頁(上一輪沒關乾淨的公文閱覽器、逾時警告頁…)。
-
-    為何需要(2026-09-16 實機事故):第 2 輪點的是 MWAA1156009143,但 driver 切到的
-    是上一輪殘留的 `doSno=1156009372` 分頁,於是在「別件公文」上讀到「如擬」並下載,
-    把 9372 的內容當成 9143 的結案資料(後續讀不到 9143 結案目錄才中止)。
-    點公文前先清乾淨,讓「非主分頁」只會有剛點開的那一個。
-
-    回傳關掉的分頁數。
-    """
-    try:
-        main_handle = driver.current_window_handle
-        handles = list(driver.window_handles)
-    except Exception as e:
-        print(f"      [WARN] 讀 window_handles 失敗,略過殘留分頁清理:{type(e).__name__}: {e}")
-        return 0
-
-    closed = 0
-    for h in handles:
-        if h == main_handle:
-            continue
-        try:
-            driver.switch_to.window(h)
-            print(f"      清掉殘留分頁:{driver.current_url[:90]}")
-            driver.close()
-            closed += 1
-        except Exception as e:
-            print(f"      [WARN] 關殘留分頁失敗:{type(e).__name__}: {e}")
-    try:
-        driver.switch_to.window(main_handle)
-    except Exception as e:
-        print(f"      [WARN] 切回主分頁失敗:{type(e).__name__}: {e}")
-    if closed:
-        print(f"      OK:已清掉 {closed} 個殘留分頁")
-    return closed
+# 文號→doSno、清殘留分頁、挑對應閱覽器分頁:與承辦中流程共用同一份實作
+# (pending_doc_handler),避免兩邊漂移(2026-10-13 承辦中因逾時警告分頁切錯分頁,
+# 修法要同時套到這裡)。
+from pending_doc_handler import (  # noqa: E402
+    _doc_no_to_sno,
+    _close_stale_windows as _close_stale_viewer_windows,
+    _find_doc_viewer_window,
+)
 
 
 def _switch_to_doc_viewer_window(driver, expect_doc_no=None, timeout=10):
@@ -1557,9 +1518,10 @@ def _switch_to_doc_viewer_window(driver, expect_doc_no=None, timeout=10):
     **必須確認切到的是「剛點的那件公文」**:傳入 expect_doc_no 時,只接受 URL 帶
     `doSno=<該文號的數字部分>` 的分頁;找不到就回 False 並印出所有候選分頁 URL,
     **不拿殘留分頁硬幹** —— 那會下載到別件公文的內容,拿去給這件公文結案(2026-09-16
-    實機踩過,見 _close_stale_viewer_windows 的說明)。
+    實機踩過,見 _close_stale_viewer_windows 的說明)。「操作時間逾時警告」分頁一律
+    不算閱覽器。
 
-    expect_doc_no=None(或文號抽不出數字)時退回舊行為:切到任一非主分頁。
+    expect_doc_no=None(或文號抽不出數字)時退回舊行為:切到任一非主(非逾時警告)分頁。
 
     成功 → driver focus 留在該公文閱覽器分頁，回 True;失敗 → 切回主分頁後回 False。
     """
@@ -1570,52 +1532,8 @@ def _switch_to_doc_viewer_window(driver, expect_doc_no=None, timeout=10):
         return False
 
     want_sno = _doc_no_to_sno(expect_doc_no)
-    deadline = time.time() + timeout
-    seen = {}
-    target = None
-
-    while True:
-        try:
-            handles = [h for h in driver.window_handles if h != main_handle]
-        except Exception as e:
-            print(f"[document_closure] 讀 window_handles 失敗：{type(e).__name__}: {e}")
-            return False
-
-        for h in handles:
-            try:
-                driver.switch_to.window(h)
-                url = driver.current_url or ""
-            except Exception:
-                continue
-            seen[h] = url
-            if want_sno is None:
-                target = h
-                break
-            if f"doSno={want_sno}" in url:
-                target = h
-                break
-        if target or time.time() >= deadline:
-            break
-        time.sleep(1)  # 閱覽器分頁還在開,等一下再掃
-
+    target = _find_doc_viewer_window(driver, main_handle, expect_doc_no, timeout=timeout)
     if target is None:
-        if not seen:
-            print("[document_closure] 沒偵測到公文閱覽器新分頁。")
-        else:
-            print(f"[document_closure] [ERROR] 找不到對應公文 {expect_doc_no}"
-                  f"(doSno={want_sno})的閱覽器分頁,不拿其他分頁代替。候選分頁:")
-            for url in seen.values():
-                print(f"        - {url[:110]}")
-        try:
-            driver.switch_to.window(main_handle)
-        except Exception:
-            pass
-        return False
-
-    try:
-        driver.switch_to.window(target)
-    except Exception as e:
-        print(f"[document_closure] 切 window 失敗：{type(e).__name__}: {e}")
         return False
 
     # 公文閱覽器載入 PDF + JS 需要幾秒

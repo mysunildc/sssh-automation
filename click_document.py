@@ -258,6 +258,9 @@ def edoc_pin_login(driver, wait_form=10, wait_nav=40):
         if cur != before and "index.jsp" not in cur:
             print(f"      OK：edoc 登入成功 → {cur}")
             time.sleep(1)  # 讓首頁 sidebar 渲染完再交給下游
+            # 二次登入轉址會把「操作時間逾時警告」開成新分頁留著,出現就立刻關掉
+            from pending_doc_handler import close_session_timeout_tabs
+            close_session_timeout_tabs(driver)
             return True
 
     try:
