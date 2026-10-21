@@ -15,9 +15,36 @@ $dir = "C:\Program Files (x86)\TCG\TCGServiSign"
 $task = "TCGServiSign_Session0"
 function L($m) { ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $m) | Out-File $LogPath -Append -Encoding utf8 }
 
+function Session0Owner {
+  $l = Get-NetTCPConnection -LocalPort 56420 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $l) { return $null }
+  $p = Get-Process -Id $l.OwningProcess -ErrorAction SilentlyContinue
+  if ($p -and $p.SessionId -eq 0 -and $p.ProcessName -eq "TCGServiSign") { return $p }
+  return $null
+}
+
+# The watchdog task (SYSTEM) and main.py (elevated user) may both run this script at once, e.g. right
+# after an RDP reconnect. Serialize them; whoever comes second sees the job done and kills nothing.
+$mutex = $null
+try {
+  $sec = New-Object Security.AccessControl.MutexSecurity
+  foreach ($sid in "S-1-5-18", "S-1-5-32-544") {
+    $id = New-Object Security.Principal.SecurityIdentifier $sid
+    $sec.AddAccessRule((New-Object Security.AccessControl.MutexAccessRule $id, "FullControl", "Allow"))
+  }
+  $created = $false
+  $mutex = New-Object Threading.Mutex $false, "Global\TCGServiSign_Session0", ([ref]$created), $sec
+  try { $null = $mutex.WaitOne(60000) } catch [Threading.AbandonedMutexException] { }
+} catch {
+  L ("mutex unavailable, continuing without it: " + $_.Exception.Message)
+  $mutex = $null
+}
+
 try {
   L "start (elevated=$(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)))"
   if (-not (Test-Path $exe)) { L "exe not found: $exe"; exit 1 }
+  $p = Session0Owner
+  if ($p) { L ("already OK: 56420 owned by session-0 pid=" + $p.Id); exit 0 }
 
   # Stop EVERY running copy (user-session AND any earlier SYSTEM/session-0 one) so we restart from a
   # known state. The non-elevated caller kills nothing itself: if UAC is denied, nothing changes.
@@ -35,15 +62,14 @@ try {
   $ok = $false
   for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 500
-    $l = Get-NetTCPConnection -LocalPort 56420 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($l) {
-      $p = Get-Process -Id $l.OwningProcess -ErrorAction SilentlyContinue
-      if ($p -and $p.SessionId -eq 0) { $ok = $true; L ("56420 listening, pid=" + $p.Id + " session=0 after " + ($i*0.5) + "s"); break }
-    }
+    $p = Session0Owner
+    if ($p) { $ok = $true; L ("56420 listening, pid=" + $p.Id + " session=0 after " + ($i*0.5) + "s"); break }
   }
-  if (-not $ok) { L "56420 not owned by a session-0 process within 20s"; exit 1 }
+  if (-not $ok) { L "56420 not owned by a session-0 TCGServiSign within 20s"; exit 1 }
   exit 0
 } catch {
   L ("EXCEPTION: " + $_.Exception.Message)
   exit 1
+} finally {
+  if ($mutex) { try { $mutex.ReleaseMutex() } catch { }; $mutex.Dispose() }
 }

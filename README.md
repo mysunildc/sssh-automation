@@ -117,6 +117,19 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 - console 語境維持原本 Monitor 方式重啟,並用 WinSCard 實測讀卡機可見。**WinSCard 檢查只在 console
   有意義**:RDP 下任何新程序自己的 winscard 也被重導、清單必為空,不能拿來判元件能不能讀卡。
 
+**常駐守護排程(2026-10-21 起,不跑 `main.py` 也生效)**:只靠 `main.py` 起手式不夠 —— 廠商 Monitor 在每次
+登入 / RDP 重連時會把主程式重拉回使用者 session(實測 2026-10-21 重連後 1 秒內全部重啟),手動用瀏覽器
+登入時就又讀不到卡。以系統管理員身分執行一次 `scripts\install_servisign_watchdog.ps1`,會註冊 SYSTEM 排程
+`TCGServiSign_Session0_Watchdog`:開機、每次登入/RDP 連線/重連後 15 秒、以及每 2 分鐘檢查一次,
+56420 不是 session 0 的 `TCGServiSign` 持有就呼叫 `servisign_session0.ps1` 切回去(log:
+`%ProgramData%\TCGServiSign_Session0\watchdog.log`)。搬移 repo 後要重跑安裝;`-Uninstall` 移除。
+SYSTEM 排程以一般權限的 `Get-ScheduledTask` 看不到,要在系統管理員視窗查。
+
+**限制(微軟設計,無法繞過)**:讀卡機廠商的「智慧卡讀卡機自我檢測程式」、HiCOS 卡片管理工具這類
+**在 RDP 視窗裡新開的程式**,讀卡一律被重導到 RDP 用戶端 → 在 RDP 下永遠顯示「讀卡機尚未正確安裝」。
+這不代表網頁登入/簽章不能用(那走 session 0 的簽章元件)。要在 RDP 下讓這類工具也讀到卡,只能把讀卡機
+改插在 RDP **用戶端**電腦並在遠端桌面連線的「本機資源 → 智慧卡」打勾(用戶端也要裝讀卡機驅動)。
+
 遇到 STOP 訊息時:
 
 | 狀況 | 怎麼做 |
